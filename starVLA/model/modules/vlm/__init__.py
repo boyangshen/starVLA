@@ -17,6 +17,9 @@ def get_vlm_model(config):
     elif "cosmos-reason2" in vlm_name.lower():
         from .CosmosReason2 import _CosmosReason2_Interface
         return _CosmosReason2_Interface(config)
+    elif "loopvlm" in vlm_name.lower():
+        from .LoopVLM import _LoopVLM_Interface
+        return _LoopVLM_Interface(config)
     else:
         raise NotImplementedError(f"VLM model {vlm_name} not implemented")
 

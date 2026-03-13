@@ -1381,6 +1381,19 @@ class Qwen3VLModel(Qwen3VLPreTrainedModel):
             return None
         cache = self._lm_input_cache
         self._lm_input_cache = None
+        
+        current_device = None
+        for key in ["inputs_embeds", "input_ids", "attention_mask", "cache_position", "position_ids"]:
+            val = cache.get(key)
+            if val is not None and isinstance(val, torch.Tensor):
+                current_device = val.device
+                break
+        
+        if current_device is not None:
+            for k, v in cache.items():
+                if isinstance(v, torch.Tensor) and v.device != current_device:
+                    cache[k] = v.to(current_device)
+        
         return cache
     
         #=============== for teacher forcing end ==================
@@ -1412,7 +1425,8 @@ class Qwen3VLCausalLMOutputWithPast(ModelOutput):
     hidden_states: Optional[tuple[torch.FloatTensor]] = None
     attentions: Optional[tuple[torch.FloatTensor]] = None
     rope_deltas: Optional[torch.LongTensor] = None
-
+    halting_scores: Optional[torch.FloatTensor] = None
+    remaining_scores: Optional[torch.FloatTensor] = None
 
 class Qwen3VLForConditionalGeneration(Qwen3VLPreTrainedModel, GenerationMixin):
     _checkpoint_conversion_mapping = {}
@@ -1516,6 +1530,8 @@ class Qwen3VLForConditionalGeneration(Qwen3VLPreTrainedModel, GenerationMixin):
             logits=logits,
             past_key_values=outputs.past_key_values,
             rope_deltas=outputs.rope_deltas,
+            halting_scores=outputs.halting_scores,
+            remaining_scores=outputs.remaining_scores,
         )
 
     def prepare_inputs_for_generation(

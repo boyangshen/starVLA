@@ -54,6 +54,9 @@ def build_framework(cfg):
     elif cfg.framework.name == "NeuroVLA":
         from starVLA.model.framework.NeuroVLA import NeuroVLA
         return NeuroVLA(cfg)
+    elif cfg.framework.name == "LoopOFT":
+        from starVLA.model.framework.LoopOFT import LoopOFT
+        return LoopOFT(cfg)
 
     # auto detect from registry
     framework_id = cfg.framework.name
