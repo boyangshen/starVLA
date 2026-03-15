@@ -85,7 +85,7 @@ class LoopOFT(baseframework):
         self.l1_loss = nn.L1Loss()
         self.mse_loss = nn.MSELoss()
 
-        self.use_teacher_llm = self.qwen_vl_interface.use_teacher_llm
+        self.use_teacher_llm = self.config.framework.use_teacher_llm
         self.initial_teacher_loss_weight = config.framework.get("teacher_loss_weight", 0.5)
         self.teacher_loss_weight = self.initial_teacher_loss_weight
         self.teacher_loss_decay_steps = config.framework.get("teacher_loss_decay_steps", 1000)
@@ -125,6 +125,7 @@ class LoopOFT(baseframework):
                 return_dict=True,
             )
             last_hidden = qwenvl_outputs.hidden_states[-1]
+            student_hidden_states = qwenvl_outputs.hidden_states
 
         with torch.autocast("cuda", dtype=torch.float32):
             input_ids = qwen_inputs.get("input_ids", None)
@@ -138,42 +139,30 @@ class LoopOFT(baseframework):
 
             action_loss = self.l1_loss(pred_actions, actions_target)
 
+        teacher_loss = 0.0
         if self.use_teacher_llm and self.training:
-            
             self._forward_step_count += 1
-            
             if self._forward_step_count % self._gradient_accumulation_steps == 0:
                 self._optimizer_step += 1
                 self.teacher_loss_weight = max(
                     0.0, 
                     self.initial_teacher_loss_weight * (1 - self._optimizer_step / self.teacher_loss_decay_steps)
                 )
-            
-            cached_inputs = self.qwen_vl_interface.model.model.pop_inputs()
-            
-            # 调试：打印 cached_inputs 的内容
-            # print("=== DEBUG ===")
-            # for k, v in cached_inputs.items():
-            #     if isinstance(v, torch.Tensor):
-            #         print(f"{k}: shape={v.shape}, device={v.device}, dtype={v.dtype}")
-            #     else:
-            #         print(f"{k}: {type(v)}")
-            
+
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 with torch.inference_mode():
-                    teacher_outputs = self.qwen_vl_interface.text_model(
-                        **cached_inputs,
+                    teacher_outputs = self.qwen_vl_interface.teacher_model(
+                        **qwen_inputs,
+                        output_attentions=False,
+                        output_hidden_states=True,
+                        return_dict=True,
                     )
-                    teacher_hidden = teacher_outputs.last_hidden_state
+                    teacher_hidden_states = teacher_outputs.hidden_states
                 
-                # 调试：打印 student 和 teacher hidden state 的形状和范围
-                student_hidden_for_teacher = last_hidden[:, :teacher_hidden.shape[1], :]
-                # print(f"student_hidden: shape={student_hidden_for_teacher.shape}, mean={student_hidden_for_teacher.mean().item():.4f}, std={student_hidden_for_teacher.std().item():.4f}")
-                # print(f"teacher_hidden: shape={teacher_hidden.shape}, mean={teacher_hidden.mean().item():.4f}, std={teacher_hidden.std().item():.4f}")
-                
-                teacher_loss = self.mse_loss(student_hidden_for_teacher, teacher_hidden.detach())
-            
-            total_loss = action_loss + self.teacher_loss_weight * teacher_loss
+                teacher_loss = self.mse_loss(student_hidden_states, teacher_hidden_states.detach())
+                total_loss = action_loss + self.teacher_loss_weight * teacher_loss
+        else:
+            total_loss = action_loss
 
             return {
                 "action_loss": action_loss,

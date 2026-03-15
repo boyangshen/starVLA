@@ -38,7 +38,7 @@ class _LoopVLM_Interface(nn.Module):
         # 优先级: vlm_path > base_vlm
         model_id = vlm_path if vlm_path else base_vlm
         
-        self.use_teacher_llm = vlm_config.get("use_teacher_llm", False)
+        self.use_teacher_llm = config.framework.get("use_teacher_llm", False)
         
         # Loop 相关参数
         self.loop_token_id = vlm_config.get("loop_token_id", 140000)
@@ -64,46 +64,35 @@ class _LoopVLM_Interface(nn.Module):
         # 设置 hidden_size 兼容属性
         self.model.config.hidden_size = self.model.config.text_config.hidden_size
         
-        # 保存 config（必须在调用 _init_text_model 之前）
+        # 保存 config（必须在调用 _init_teacher_model 之前）
         self.config = config
         
         # Teacher Model: 只在训练模式时初始化
         # 根据 config 框架配置中的 is_training 标志决定是否初始化
         self.is_training_mode = config.framework.get("is_training", True)
         if self.use_teacher_llm and self.is_training_mode:
-            self._init_text_model()
+            self._init_teacher_model()
         else:
-            self.text_model = None
+            self.teacher_model = None
         
         self.processor = AutoProcessor.from_pretrained(model_id)
 
-    def _init_text_model(self):
-        """初始化 text_model（用于 teacher forcing）。"""
-        if hasattr(self, 'text_model') and self.text_model is not None:
+    def _init_teacher_model(self):
+        """初始化 teacher_model（用于 teacher forcing）。"""
+        if hasattr(self, 'teacher_model') and self.teacher_model is not None:
             return
         
-        # Initialize text_model attribute before use
-        self.text_model = None
+        self.teacher_model = None
         
-        text_config = self.model_config.text_config
-        text_config.as_student = False
-        self.text_model = Qwen3VLTextModel(text_config)
-        self.text_model.requires_grad_(False)
+        self.teacher_model = Qwen3VLForConditionalGeneration(self.model_config)
+        self.teacher_model.requires_grad_(False)
         
         # 加载权重
         pretrained_weights_path = self.config.framework.get("qwenvl", {}).get("pretrained_weights_path", None)
         if pretrained_weights_path:
             state_dict = load_file(pretrained_weights_path)
-            
-            text_model_state_dict = {}
-            prefix = "model.language_model."
-            for key, value in state_dict.items():
-                if key.startswith(prefix):
-                    new_key = key[len(prefix):]
-                    text_model_state_dict[new_key] = value
-            
-            missing, unex = self.text_model.load_state_dict(text_model_state_dict, strict=False)        
-        print(f"✅ Initialized text_model (frozen) for teacher forcing")
+            missing, unex = self.teacher_model.load_state_dict(state_dict, strict=False)        
+        print(f"✅ Initialized teacher_model (frozen) for teacher forcing")
         
     def forward(
         self,

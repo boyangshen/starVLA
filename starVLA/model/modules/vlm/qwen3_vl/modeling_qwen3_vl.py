@@ -790,6 +790,7 @@ class Qwen3VLTextModel(Qwen3VLPreTrainedModel):
             self.stop_threshold = config.stop_threshold
 
         else:
+            config.num_hidden_layers = 28
             self.num_preserved_layers = 24
             self.num_loop = 1
 
@@ -1296,20 +1297,20 @@ class Qwen3VLModel(Qwen3VLPreTrainedModel):
                 position_ids = position_ids.unsqueeze(0).expand(3, -1, -1)
 
         #=============== for teacher forcing  start ==================
-        if self.training and self.config.use_teacher_llm:
-            if not hasattr(self, "_lm_input_cache"):
-                self._lm_input_cache = None
-            self.cache_inputs(
-                input_ids=None,
-                position_ids=position_ids,
-                attention_mask=attention_mask,
-                past_key_values=past_key_values,
-                inputs_embeds=inputs_embeds,
-                cache_position=cache_position,
-                visual_pos_masks=visual_pos_masks,
-                deepstack_visual_embeds=deepstack_visual_embeds,
-                **kwargs
-            )
+        # if self.training and self.config.use_teacher_llm:
+        #     if not hasattr(self, "_lm_input_cache"):
+        #         self._lm_input_cache = None
+        #     self.cache_inputs(
+        #         input_ids=None,
+        #         position_ids=position_ids,
+        #         attention_mask=attention_mask,
+        #         past_key_values=past_key_values,
+        #         inputs_embeds=inputs_embeds,
+        #         cache_position=cache_position,
+        #         visual_pos_masks=visual_pos_masks,
+        #         deepstack_visual_embeds=deepstack_visual_embeds,
+        #         **kwargs
+        #     )
         #=============== for teacher forcing end ==================
 
         outputs = self.language_model(

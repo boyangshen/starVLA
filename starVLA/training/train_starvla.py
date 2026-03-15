@@ -438,7 +438,7 @@ class VLATrainer(TrainerUtils):
                 output_dict = self.model.forward(batch_vla)
 
                 action_loss = output_dict["action_loss"]
-                total_loss = action_loss
+                total_loss = output_dict.get("total_loss", action_loss)
 
             # VLA backward propagation
             self.accelerator.backward(total_loss)
@@ -451,9 +451,17 @@ class VLATrainer(TrainerUtils):
             self.optimizer.step()
             self.lr_scheduler.step()
 
-        return {
-            "action_dit_loss": action_loss.item(),
-        }
+        metrics = {}
+        for key, value in output_dict.items():
+            if isinstance(value, torch.Tensor):
+                if value.numel() == 1:
+                    metrics[key] = value.item()
+                else:
+                    metrics[key] = value.mean().item()
+            elif isinstance(value, (int, float)):
+                metrics[key] = value
+        
+        return metrics
 
     def _finalize_training(self):
         """training end processing"""
