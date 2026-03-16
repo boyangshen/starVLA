@@ -37,6 +37,7 @@ class _LoopVLM_Interface(nn.Module):
         
         # 优先级: vlm_path > base_vlm
         model_id = vlm_path if vlm_path else base_vlm
+        self.model_id = model_id
         
         self.use_teacher_llm = config.framework.get("use_teacher_llm", False)
         
@@ -45,16 +46,17 @@ class _LoopVLM_Interface(nn.Module):
         self.as_student = vlm_config.get("as_student", False)
         self.num_preserved_layers = vlm_config.get("num_preserved_layers", 24)
         self.num_loop = vlm_config.get("num_loop", 1)
-        self.stop_threshold = vlm_config.get("stop_threshold", 0.5)
+        self.stop_threshold = vlm_config.get("stop_threshold", 0.05)
         
-        self.model_config = Qwen3VLConfig.from_pretrained(model_id)
-        self.model_config.use_teacher_llm = self.use_teacher_llm
-        self.model_config.as_student = self.as_student
-        self.model_config.num_preserved_layers = self.num_preserved_layers
-        self.model_config.num_loop = self.num_loop
-        self.model_config.stop_threshold = self.stop_threshold
+        model_config = Qwen3VLConfig.from_pretrained(model_id)
+        model_config.use_teacher_llm = self.use_teacher_llm
+        model_config.text_config.use_teacher_llm = self.use_teacher_llm
+        model_config.text_config.as_student = self.as_student
+        model_config.text_config.num_preserved_layers = self.num_preserved_layers
+        model_config.text_config.num_loop = self.num_loop
+        model_config.text_config.stop_threshold = self.stop_threshold
         
-        self.model = Qwen3VLForConditionalGeneration(self.model_config)
+        self.model = Qwen3VLForConditionalGeneration(model_config)
         
         pretrained_weights_path = vlm_config.get("pretrained_weights_path", None)
         if pretrained_weights_path:
@@ -82,9 +84,9 @@ class _LoopVLM_Interface(nn.Module):
         if hasattr(self, 'teacher_model') and self.teacher_model is not None:
             return
         
-        self.teacher_model = None
-        
-        self.teacher_model = Qwen3VLForConditionalGeneration(self.model_config)
+        model_config = Qwen3VLConfig.from_pretrained(self.model_id)
+        model_config.text_config.as_student = False
+        self.teacher_model = Qwen3VLForConditionalGeneration(model_config)
         self.teacher_model.requires_grad_(False)
         
         # 加载权重

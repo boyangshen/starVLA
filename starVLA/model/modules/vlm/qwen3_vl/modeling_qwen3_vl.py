@@ -783,7 +783,8 @@ class Qwen3VLTextModel(Qwen3VLPreTrainedModel):
             # halting projector
             self.halting_projector = nn.Sequential(
                 nn.Linear(config.hidden_size, config.hidden_size // 4),
-                nn.GELU(),
+                nn.BatchNorm1d(config.hidden_size // 4),
+                nn.ReLU(),
                 nn.Linear(config.hidden_size // 4, 1),
                 nn.Sigmoid(),
             )
@@ -907,12 +908,13 @@ class Qwen3VLTextModel(Qwen3VLPreTrainedModel):
             **kwargs,
         )
 
-        halting_scores = list()
-        anti_halting_scores = list()
-        remaining_scores = list()
- 
+        halting_scores = []        
+        remaining_scores = []
+
+        remaining_mass = None
         shared_layers = nn.ModuleList([self.layers[4 + i] for i in range(self.num_preserved_layers)])
-        for _ in range(self.num_loop):
+        for loop_idx in range(self.num_loop):
+
             for offset in range(self.num_preserved_layers):
                 hidden_states = shared_layers[offset](
                     hidden_states,
@@ -924,19 +926,28 @@ class Qwen3VLTextModel(Qwen3VLPreTrainedModel):
                     **kwargs,
                 )
 
-                if self.as_student:
-                    halting_score = self.halting_projector(hidden_states[:, 0, :])
-                    halting_scores.append(halting_score)
-                    anti_halting_scores.append(1-halting_score)
+            if self.as_student:
 
-                    remaining_probability = 1
-                    for anti_halting_score in anti_halting_scores[:-1]:
-                        remaining_probability *= anti_halting_score
-                    remaining_probability *= halting_score
-                    remaining_scores.append(remaining_probability)
-                    
-                    if self.config.use_teacher_llm and not self.training and remaining_probability < self.stop_threshold:
-                        break
+                halting_score = self.halting_projector(hidden_states[:, 0, :])  # p_t
+                halting_scores.append(halting_score)
+
+                if remaining_mass is None:
+                    remaining_mass = torch.ones_like(halting_score)
+
+                # cumulative halting
+                current_halt = torch.minimum(remaining_mass, halting_score)
+
+                remaining_scores.append(current_halt)
+
+                remaining_mass = remaining_mass - current_halt
+
+                # inference early stop
+                if (
+                    self.config.use_teacher_llm
+                    and not self.training
+                    and torch.all(remaining_mass < self.stop_threshold)
+                ):
+                    break
         
         #----------------- for teacher forcing end -----------------
 

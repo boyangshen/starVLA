@@ -26,7 +26,6 @@ import numpy as np
 from PIL import Image
 
 
-
 from starVLA.training.trainer_utils import initialize_overwatch
 from starVLA.model.tools import FRAMEWORK_REGISTRY
 from deployment.model_server.tools.image_tools import to_pil_preserve
@@ -84,14 +83,39 @@ class LoopOFT(baseframework):
 
         self.l1_loss = nn.L1Loss()
         self.mse_loss = nn.MSELoss()
+        
+        self._init_halting_projector()
 
         self.use_teacher_llm = self.config.framework.use_teacher_llm
+        self.computation_penalty_weight = self.config.framework.get("computation_penalty_weight", 0.0)
+        self.halting_entropy_weight = self.config.framework.get("halting_entropy_weight", 0.0)
         self.initial_teacher_loss_weight = config.framework.get("teacher_loss_weight", 0.5)
         self.teacher_loss_weight = self.initial_teacher_loss_weight
         self.teacher_loss_decay_steps = config.framework.get("teacher_loss_decay_steps", 1000)
         self._optimizer_step = 0
         self._gradient_accumulation_steps = config.trainer.get("gradient_accumulation_steps", 1)
         self._forward_step_count = 0
+
+    def _init_halting_projector(self):
+        lm = self.qwen_vl_interface.model.language_model
+
+        if not hasattr(lm, "halting_projector"):
+            return
+
+        module = lm.halting_projector
+        last_linear = None
+        for m in module.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                nn.init.zeros_(m.bias)
+                last_linear = m
+            elif isinstance(m, nn.BatchNorm1d):
+                nn.init.ones_(m.weight)
+                nn.init.zeros_(m.bias)
+
+        # 控制初始 halting probability
+        if last_linear is not None:
+            nn.init.constant_(last_linear.bias, -1.5)
 
     def forward(
         self,
@@ -125,11 +149,50 @@ class LoopOFT(baseframework):
                 return_dict=True,
             )
             last_hidden = qwenvl_outputs.hidden_states[-1]
-            student_hidden_states = qwenvl_outputs.hidden_states
+            student_hidden_states = torch.stack(qwenvl_outputs.hidden_states,dim=1)
+            halting_scores = torch.stack(qwenvl_outputs.halting_scores, dim=1).squeeze(-1)
+            remaining_scores = torch.stack(qwenvl_outputs.remaining_scores, dim=1).squeeze(-1)
+
+        # mask = remaining_scores < self.qwen_vl_interface.stop_threshold     # （B,L）
+        # first_indices = mask.int().argmax(dim=1)
+        # has_any = mask.any(dim=1)                          # [B]
+        # first_indices = torch.where(
+        #     has_any, 
+        #     first_indices, 
+        #     torch.full_like(first_indices, self.qwen_vl_interface.num_loop-1)
+        # )
+        # halting_scores *= (
+        #     torch.arange(halting_scores.shape[1], device=halting_scores.device)
+        #     <= first_indices.unsqueeze(1)
+        # )
+
+        # TODO： get halting layer output for last_hidden
+        tmp_hidden_states = student_hidden_states[:,5::self.qwen_vl_interface.num_preserved_layers]
+        assert tmp_hidden_states.shape[1] == self.qwen_vl_interface.num_loop
+        student_last_hidden = torch.einsum("blsh,bl->bsh", tmp_hidden_states, remaining_scores)
+
+        remaining_scores_mean = remaining_scores.mean()
+
+        # expected steps penalty
+        B, L = remaining_scores.shape
+        steps = torch.arange(
+            1, L + 1,
+            device=remaining_scores.device,
+            dtype=remaining_scores.dtype
+        )
+        expected_steps = (remaining_scores * steps).sum(dim=1)
+        computation_penalty = expected_steps.mean()
+        computation_penalty_loss = self.computation_penalty_weight * computation_penalty
+
+        # halting entropy loss
+        p = halting_scores.clamp(1e-6, 1 - 1e-6)
+        entropy = -(p * torch.log(p) + (1 - p) * torch.log(1 - p)).mean()
+        entropy_loss = -entropy * self.halting_entropy_weight
+
 
         with torch.autocast("cuda", dtype=torch.float32):
             input_ids = qwen_inputs.get("input_ids", None)
-            action_queries = self._gather_action_token_embeddings(last_hidden, input_ids, action_token_id=self.action_token_id)
+            action_queries = self._gather_action_token_embeddings(student_last_hidden, input_ids, action_token_id=self.action_token_id)
             pred_actions = self.action_model.predict_action(action_queries)
 
             actions = torch.tensor(
@@ -157,23 +220,24 @@ class LoopOFT(baseframework):
                         output_hidden_states=True,
                         return_dict=True,
                     )
-                    teacher_hidden_states = teacher_outputs.hidden_states
+                    teacher_hidden_states = torch.stack(teacher_outputs.hidden_states, dim=1)
+
+                teacher_loss = self.teacher_loss_weight * self.mse_loss(student_hidden_states, teacher_hidden_states)
                 
-                teacher_loss = self.mse_loss(student_hidden_states, teacher_hidden_states.detach())
-                total_loss = action_loss + self.teacher_loss_weight * teacher_loss
+            total_loss = action_loss +  teacher_loss + computation_penalty_loss + entropy_loss
+
         else:
-            total_loss = action_loss
+            total_loss = action_loss + computation_penalty_loss + entropy_loss
 
-            return {
-                "action_loss": action_loss,
-                "teacher_loss": teacher_loss,
-                "teacher_loss_weight": self.teacher_loss_weight,
-                "total_loss": total_loss,
-            }
-
-        return {"action_loss": action_loss}
-
-
+        return {
+            "action_loss": action_loss,
+            "teacher_loss": teacher_loss,
+            "computation_penalty_loss": computation_penalty_loss,
+            "entropy_loss": entropy_loss,
+            "teacher_loss_weight": self.teacher_loss_weight,
+            "remaining_scores_mean": remaining_scores_mean,
+            "total_loss": total_loss,
+        }
 
     @torch.inference_mode()
     def predict_action(
@@ -194,6 +258,17 @@ class LoopOFT(baseframework):
         instructions = [instruction + prompt_suffix for instruction in instructions]
 
         qwen_inputs = self.qwen_vl_interface.build_qwenvl_inputs(images=batch_images, instructions=instructions)
+        
+        # 添加 loop token
+        input_ids = qwen_inputs.get("input_ids")
+        if input_ids is not None:
+            loop_token = torch.full((input_ids.shape[0], 1), self.loop_token_id, dtype=input_ids.dtype, device=input_ids.device)
+            qwen_inputs["input_ids"] = torch.cat([loop_token, input_ids], dim=1)
+            if "attention_mask" in qwen_inputs:
+                attention_mask = qwen_inputs["attention_mask"]
+                ones = torch.ones((attention_mask.shape[0], 1), dtype=attention_mask.dtype, device=attention_mask.device)
+                qwen_inputs["attention_mask"] = torch.cat([ones, attention_mask], dim=1)
+        
         with torch.autocast("cuda", dtype=torch.bfloat16):
             qwenvl_outputs = self.qwen_vl_interface(
                 **qwen_inputs,
@@ -201,11 +276,19 @@ class LoopOFT(baseframework):
                 output_hidden_states=True,
                 return_dict=True,
             )
-            last_hidden = qwenvl_outputs.hidden_states[-1]
+            
+            # 处理 loop 相关的 hidden states
+            student_hidden_states = torch.stack(qwenvl_outputs.hidden_states, dim=1)
+            halting_scores = torch.stack(qwenvl_outputs.halting_scores, dim=1).squeeze(-1)
+            remaining_scores = torch.stack(qwenvl_outputs.remaining_scores, dim=1).squeeze(-1)
+            
+            # 使用 remaining_scores 作为权重进行加权平均
+            tmp_hidden_states = student_hidden_states[:,5::self.qwen_vl_interface.num_preserved_layers]
+            student_last_hidden = torch.einsum("blsh,bl->bsh", tmp_hidden_states, remaining_scores)
 
         with torch.autocast("cuda", dtype=torch.float32):
             input_ids = qwen_inputs.get("input_ids", None)
-            action_queries = self._gather_action_token_embeddings(last_hidden, input_ids, action_token_id=self.action_token_id)
+            action_queries = self._gather_action_token_embeddings(student_last_hidden, input_ids, action_token_id=self.action_token_id)
             pred_actions = self.action_model.predict_action(action_queries)
 
         normalized_actions = pred_actions.detach().cpu().numpy()
