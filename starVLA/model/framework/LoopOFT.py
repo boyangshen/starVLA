@@ -171,7 +171,7 @@ class LoopOFT(baseframework):
         assert tmp_hidden_states.shape[1] == self.qwen_vl_interface.num_loop
         student_last_hidden = torch.einsum("blsh,bl->bsh", tmp_hidden_states, remaining_scores)
 
-        remaining_scores_mean = remaining_scores.mean()
+        print(f"{remaining_scores=}")
 
         # expected steps penalty
         B, L = remaining_scores.shape
@@ -184,10 +184,11 @@ class LoopOFT(baseframework):
         computation_penalty = expected_steps.mean()
         computation_penalty_loss = self.computation_penalty_weight * computation_penalty
 
-        # halting entropy loss
-        p = halting_scores.clamp(1e-6, 1 - 1e-6)
-        entropy = -(p * torch.log(p) + (1 - p) * torch.log(1 - p)).mean()
-        entropy_loss = -entropy * self.halting_entropy_weight
+        # halting entropy loss (commented out)
+        # p = halting_scores.clamp(1e-6, 1 - 1e-6)
+        # entropy = -(p * torch.log(p) + (1 - p) * torch.log(1 - p)).mean()
+        # entropy_loss = -entropy * self.halting_entropy_weight
+        entropy_loss = 0.0
 
 
         with torch.autocast("cuda", dtype=torch.float32):
@@ -207,10 +208,8 @@ class LoopOFT(baseframework):
             self._forward_step_count += 1
             if self._forward_step_count % self._gradient_accumulation_steps == 0:
                 self._optimizer_step += 1
-                self.teacher_loss_weight = max(
-                    0.0, 
-                    self.initial_teacher_loss_weight * (1 - self._optimizer_step / self.teacher_loss_decay_steps)
-                )
+                if self._optimizer_step >= self.teacher_loss_decay_steps:
+                    self.teacher_loss_weight = 0.0
 
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 with torch.inference_mode():
@@ -222,9 +221,10 @@ class LoopOFT(baseframework):
                     )
                     teacher_hidden_states = torch.stack(teacher_outputs.hidden_states, dim=1)
 
-                teacher_loss = self.teacher_loss_weight * self.mse_loss(student_hidden_states, teacher_hidden_states)
+                teacher_loss = self.mse_loss(student_hidden_states, teacher_hidden_states)
+                weighted_teacher_loss = self.teacher_loss_weight * teacher_loss
                 
-            total_loss = action_loss +  teacher_loss + computation_penalty_loss + entropy_loss
+            total_loss = action_loss +  weighted_teacher_loss + computation_penalty_loss + entropy_loss
 
         else:
             total_loss = action_loss + computation_penalty_loss + entropy_loss
@@ -235,7 +235,6 @@ class LoopOFT(baseframework):
             "computation_penalty_loss": computation_penalty_loss,
             "entropy_loss": entropy_loss,
             "teacher_loss_weight": self.teacher_loss_weight,
-            "remaining_scores_mean": remaining_scores_mean,
             "total_loss": total_loss,
         }
 
