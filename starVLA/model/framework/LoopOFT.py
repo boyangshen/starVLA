@@ -81,7 +81,7 @@ class LoopOFT(baseframework):
         
         self.loop_token_id = self.qwen_vl_interface.loop_token_id
 
-        self.l1_loss = nn.L1Loss()
+        self.l1_loss = nn.L1Loss(reduction='none')
         self.mse_loss = nn.MSELoss()
         
         self._init_halting_projector(self.config.framework.qwenvl.num_loop)
@@ -92,6 +92,10 @@ class LoopOFT(baseframework):
         self.initial_teacher_loss_weight = config.framework.get("teacher_loss_weight", 0.5)
         self.teacher_loss_weight = self.initial_teacher_loss_weight
         self.teacher_loss_decay_steps = config.framework.get("teacher_loss_decay_steps", 1000)
+        # Loop effectiveness loss parameters
+        self.use_loop_effectiveness_loss = config.framework.get("use_loop_effectiveness_loss", False)
+        self.loop_effectiveness_k = config.framework.get("loop_effectiveness_k", 1.0)
+        self.loop_effectiveness_gamma = config.framework.get("loop_effectiveness_gamma", 0.0)
         self._optimizer_step = 0
         self._gradient_accumulation_steps = config.trainer.get("gradient_accumulation_steps", 1)
         self._forward_step_count = 0
@@ -193,39 +197,65 @@ class LoopOFT(baseframework):
         # TODO： get halting layer output for last_hidden
         tmp_hidden_states = student_hidden_states[:,5::self.qwen_vl_interface.num_preserved_layers]
         assert tmp_hidden_states.shape[1] == self.qwen_vl_interface.num_loop
-        student_last_hidden = torch.einsum("blsh,bl->bsh", tmp_hidden_states, remaining_scores)
 
         print(f"{remaining_scores=}")
 
-        # expected steps penalty
-        B, L = remaining_scores.shape
-        steps = torch.arange(
-            1, L + 1,
-            device=remaining_scores.device,
-            dtype=remaining_scores.dtype
-        )
-        expected_steps = (remaining_scores * steps).sum(dim=1)
-        computation_penalty = expected_steps.mean()
-        computation_penalty_loss = self.computation_penalty_weight * computation_penalty
-
-        # halting entropy loss (commented out)
-        # p = halting_scores.clamp(1e-6, 1 - 1e-6)
-        # entropy = -(p * torch.log(p) + (1 - p) * torch.log(1 - p)).mean()
-        # entropy_loss = -entropy * self.halting_entropy_weight
-        entropy_loss = 0.0
+        # remaining score entropy loss
+        p = remaining_scores.clamp(1e-6, 1.0)
+        entropy = -(p * torch.log(p)).sum(dim=1)
+        entropy_loss = -entropy.mean() * self.halting_entropy_weight
 
 
         with torch.autocast("cuda", dtype=torch.float32):
             input_ids = qwen_inputs.get("input_ids", None)
-            action_queries = self._gather_action_token_embeddings(student_last_hidden, input_ids, action_token_id=self.action_token_id)
-            pred_actions = self.action_model.predict_action(action_queries)
-
+            
+            # Process each layer's hidden state through action head and compute weighted loss
             actions = torch.tensor(
-                np.array(actions), device=pred_actions.device, dtype=pred_actions.dtype
+                np.array(actions), device=tmp_hidden_states.device, dtype=torch.float32
             )
             actions_target = actions[:, -(self.future_action_window_size+1):, :]
-
-            action_loss = self.l1_loss(pred_actions, actions_target)
+            
+            # Compute loss for each layer's output
+            action_losses = []
+            for i in range(tmp_hidden_states.shape[1]):
+                layer_hidden = tmp_hidden_states[:, i, :, :]  # [B, S, H]
+                action_queries = self._gather_action_token_embeddings(layer_hidden, input_ids, action_token_id=self.action_token_id)
+                pred_actions = self.action_model.predict_action(action_queries)
+                # Use reduction='none' to keep batch dimension (already set in constructor)
+                layer_loss = self.l1_loss(pred_actions, actions_target)
+                # Take mean over action dimensions but keep batch dimension
+                layer_loss = layer_loss.mean(dim=[1, 2])  # [B]
+                action_losses.append(layer_loss)
+            
+            # Stack losses and apply remaining_scores weighting
+            action_losses = torch.stack(action_losses, dim=1)  # [B, num_loop]
+            action_loss = (action_losses * remaining_scores).sum(dim=1).mean()
+            
+            # Loop effectiveness loss
+            loop_effectiveness_loss = 0.0
+            if self.use_loop_effectiveness_loss and action_losses.shape[1] > 1:
+                # Compute improvement: previous loss - current loss
+                improvement = action_losses[:, :-1] - action_losses[:, 1:]  # [B, num_loop-1]
+                improvement = improvement.detach()  # Detach to avoid gradient flow
+                
+                # Compute w_t = sigmoid(k * (I_t - gamma))
+                k = self.loop_effectiveness_k
+                gamma = self.loop_effectiveness_gamma
+                w_t = torch.sigmoid(k * (improvement - gamma))  # [B, num_loop-1]
+                
+                # Compute target_stop = 1 - w_t
+                target_stop = 1 - w_t  # [B, num_loop-1]
+                
+                # Compute cross entropy between remaining_scores and target_stop
+                # Take the first (num_loop-1) elements of remaining_scores
+                remaining_scores_truncated = remaining_scores[:, :action_losses.shape[1]-1]  # [B, num_loop-1]
+                
+                # Cross entropy loss
+                loop_effectiveness_loss = F.binary_cross_entropy(
+                    remaining_scores_truncated, 
+                    target_stop, 
+                    reduction='mean'
+                )
 
         teacher_loss = 0.0
         if self.use_teacher_llm and self.training:
@@ -248,16 +278,16 @@ class LoopOFT(baseframework):
                 teacher_loss = self.mse_loss(student_hidden_states, teacher_hidden_states)
                 weighted_teacher_loss = self.teacher_loss_weight * teacher_loss
                 
-            total_loss = action_loss +  weighted_teacher_loss + computation_penalty_loss + entropy_loss
+            total_loss = action_loss + weighted_teacher_loss + entropy_loss + loop_effectiveness_loss
 
         else:
-            total_loss = action_loss + computation_penalty_loss + entropy_loss
+            total_loss = action_loss + entropy_loss + loop_effectiveness_loss
 
         return {
             "action_loss": action_loss,
             "teacher_loss": teacher_loss,
-            "computation_penalty_loss": computation_penalty_loss,
             "entropy_loss": entropy_loss,
+            "loop_effectiveness_loss": loop_effectiveness_loss,
             "teacher_loss_weight": self.teacher_loss_weight,
             "total_loss": total_loss,
         }
@@ -302,12 +332,10 @@ class LoopOFT(baseframework):
             
             # 处理 loop 相关的 hidden states
             student_hidden_states = torch.stack(qwenvl_outputs.hidden_states, dim=1)
-            halting_scores = torch.stack(qwenvl_outputs.halting_scores, dim=1).squeeze(-1)
-            remaining_scores = torch.stack(qwenvl_outputs.remaining_scores, dim=1).squeeze(-1)
             
-            # 使用 remaining_scores 作为权重进行加权平均
+            # 推理时只使用最后一个 hidden state
             tmp_hidden_states = student_hidden_states[:,5::self.qwen_vl_interface.num_preserved_layers]
-            student_last_hidden = torch.einsum("blsh,bl->bsh", tmp_hidden_states, remaining_scores)
+            student_last_hidden = tmp_hidden_states[:, -1, :, :]  # [B, S, H]
 
         with torch.autocast("cuda", dtype=torch.float32):
             input_ids = qwen_inputs.get("input_ids", None)

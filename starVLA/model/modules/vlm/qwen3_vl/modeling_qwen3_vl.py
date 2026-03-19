@@ -913,7 +913,27 @@ class Qwen3VLTextModel(Qwen3VLPreTrainedModel):
 
         remaining_mass = None
 
+        # Generate visual_pos_masks from input_ids if not provided
+        if visual_pos_masks is None and input_ids is not None:
+            image_token_id = getattr(self.config, 'image_token_id', 151655)
+            video_token_id = getattr(self.config, 'video_token_id', 151656)
+            visual_pos_masks = (input_ids == image_token_id) | (input_ids == video_token_id)
+
+        # Define shared layers for loop
+        shared_layers = self.layers[4:4+self.num_preserved_layers]
+
         for loop_idx in range(self.num_loop):
+
+            # ===== split vision tokens and concat with detached hidden states =====
+            if visual_pos_masks is not None:
+                # Create a new tensor that only detaches text tokens, keeps vision tokens
+                # visual_pos_masks: [B, L], hidden_states: [B, L, D]
+                # Invert mask: True for text tokens, False for vision tokens
+                text_mask = ~visual_pos_masks  # [B, L]
+                # Create a copy to avoid inplace operation
+                hidden_states = hidden_states.clone()
+                # Detach only text positions
+                hidden_states[text_mask] = hidden_states[text_mask].detach()
 
             # ===== transformer forward =====
             for offset in range(self.num_preserved_layers):
