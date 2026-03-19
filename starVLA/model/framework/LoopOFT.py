@@ -84,7 +84,7 @@ class LoopOFT(baseframework):
         self.l1_loss = nn.L1Loss()
         self.mse_loss = nn.MSELoss()
         
-        self._init_halting_projector()
+        self._init_halting_projector(self.config.framework.qwenvl.num_loop)
 
         self.use_teacher_llm = self.config.framework.use_teacher_llm
         self.computation_penalty_weight = self.config.framework.get("computation_penalty_weight", 0.0)
@@ -96,7 +96,7 @@ class LoopOFT(baseframework):
         self._gradient_accumulation_steps = config.trainer.get("gradient_accumulation_steps", 1)
         self._forward_step_count = 0
 
-    def _init_halting_projector(self):
+    def _init_halting_projector(self, Tmax):
         lm = self.qwen_vl_interface.model.language_model
 
         if not hasattr(lm, "halting_projector"):
@@ -104,18 +104,42 @@ class LoopOFT(baseframework):
 
         module = lm.halting_projector
         last_linear = None
+
+        # ===== 1. 初始化权重（缩小scale，防止sigmoid饱和）=====
         for m in module.modules():
             if isinstance(m, nn.Linear):
-                nn.init.xavier_uniform_(m.weight)
+                nn.init.xavier_uniform_(m.weight, gain=0.1)  # 🔥关键：缩小
                 nn.init.zeros_(m.bias)
                 last_linear = m
+
             elif isinstance(m, nn.BatchNorm1d):
                 nn.init.ones_(m.weight)
                 nn.init.zeros_(m.bias)
 
-        # 控制初始 halting probability
+        # ===== 2. 初始化bias（step-aware + 随机）=====
         if last_linear is not None:
-            nn.init.constant_(last_linear.bias, -1.5)
+            # 参数可以调
+            base = -2.0        # 初始更偏向继续
+            step_scale = 0.4   # 每步增加停止概率
+            noise_std = 0.1    # 小随机扰动
+
+            # 如果 bias 是标量（shared head）
+            if last_linear.bias.numel() == 1:
+                b = base + (Tmax / 2) * step_scale
+                b += torch.randn(1).item() * noise_std
+                nn.init.constant_(last_linear.bias, b)
+
+            # 如果 bias 是 per-step（少见但更强）
+            else:
+                bias = []
+                for t in range(Tmax):
+                    b = base + step_scale * t
+                    b += torch.randn(1).item() * noise_std
+                    bias.append(b)
+
+                last_linear.bias.data = torch.tensor(
+                    bias, device=last_linear.bias.device, dtype=last_linear.bias.dtype
+                )
 
     def forward(
         self,
@@ -135,11 +159,11 @@ class LoopOFT(baseframework):
         input_ids = qwen_inputs.get("input_ids")
         if input_ids is not None:
             loop_token = torch.full((input_ids.shape[0], 1), self.loop_token_id, dtype=input_ids.dtype, device=input_ids.device)
-            qwen_inputs["input_ids"] = torch.cat([loop_token, input_ids], dim=1)
+            qwen_inputs["input_ids"] = torch.cat([input_ids, loop_token], dim=1)
             if "attention_mask" in qwen_inputs:
                 attention_mask = qwen_inputs["attention_mask"]
                 ones = torch.ones((attention_mask.shape[0], 1), dtype=attention_mask.dtype, device=attention_mask.device)
-                qwen_inputs["attention_mask"] = torch.cat([ones, attention_mask], dim=1)
+                qwen_inputs["attention_mask"] = torch.cat([attention_mask, ones], dim=1)
     
         with torch.autocast("cuda", dtype=torch.bfloat16):
             qwenvl_outputs = self.qwen_vl_interface(
@@ -262,11 +286,11 @@ class LoopOFT(baseframework):
         input_ids = qwen_inputs.get("input_ids")
         if input_ids is not None:
             loop_token = torch.full((input_ids.shape[0], 1), self.loop_token_id, dtype=input_ids.dtype, device=input_ids.device)
-            qwen_inputs["input_ids"] = torch.cat([loop_token, input_ids], dim=1)
+            qwen_inputs["input_ids"] = torch.cat([input_ids, loop_token], dim=1)
             if "attention_mask" in qwen_inputs:
                 attention_mask = qwen_inputs["attention_mask"]
                 ones = torch.ones((attention_mask.shape[0], 1), dtype=attention_mask.dtype, device=attention_mask.device)
-                qwen_inputs["attention_mask"] = torch.cat([ones, attention_mask], dim=1)
+                qwen_inputs["attention_mask"] = torch.cat([attention_mask, ones], dim=1)
         
         with torch.autocast("cuda", dtype=torch.bfloat16):
             qwenvl_outputs = self.qwen_vl_interface(

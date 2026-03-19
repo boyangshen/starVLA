@@ -783,7 +783,7 @@ class Qwen3VLTextModel(Qwen3VLPreTrainedModel):
             # halting projector
             self.halting_projector = nn.Sequential(
                 nn.Linear(config.hidden_size, config.hidden_size // 4),
-                nn.BatchNorm1d(config.hidden_size // 4),
+                nn.LayerNorm(config.hidden_size // 4),
                 nn.ReLU(),
                 nn.Linear(config.hidden_size // 4, 1),
                 nn.Sigmoid(),
@@ -908,13 +908,14 @@ class Qwen3VLTextModel(Qwen3VLPreTrainedModel):
             **kwargs,
         )
 
-        halting_scores = []        
-        remaining_scores = []
+        halting_scores = []
+        p_t_list = []
 
         remaining_mass = None
-        shared_layers = nn.ModuleList([self.layers[4 + i] for i in range(self.num_preserved_layers)])
+
         for loop_idx in range(self.num_loop):
 
+            # ===== transformer forward =====
             for offset in range(self.num_preserved_layers):
                 hidden_states = shared_layers[offset](
                     hidden_states,
@@ -928,27 +929,33 @@ class Qwen3VLTextModel(Qwen3VLPreTrainedModel):
 
             if self.as_student:
 
-                halting_score = self.halting_projector(hidden_states[:, 0, :])  # p_t
+                # ===== 1. λ_t =====
+                halting_score = torch.sigmoid(
+                    self.halting_projector(hidden_states[:, -1, :])
+                )  # [B, 1]
+
                 halting_scores.append(halting_score)
 
+                # ===== 2. 初始化 remaining_mass =====
                 if remaining_mass is None:
                     remaining_mass = torch.ones_like(halting_score)
 
-                # cumulative halting
-                current_halt = torch.minimum(remaining_mass, halting_score)
+                # ===== 3. 计算 p(t) =====
+                p_t = halting_score * remaining_mass
+                p_t_list.append(p_t)
 
-                remaining_scores.append(current_halt)
+                # ===== 4. 更新 remaining_mass =====
+                remaining_mass = remaining_mass * (1.0 - halting_score)
 
-                remaining_mass = remaining_mass - current_halt
-
-                # inference early stop
-                if (
-                    self.config.use_teacher_llm
-                    and not self.training
-                    and torch.all(remaining_mass < self.stop_threshold)
-                ):
+                # ===== 5. inference early stop =====
+                if (not self.training) and torch.all(remaining_mass < self.stop_threshold):
                     break
-        
+
+        # ===== absorb remaining mass =====
+        if self.as_student:
+            if len(p_t_list) > 0:
+                p_t_list[-1] = p_t_list[-1] + remaining_mass
+
         #----------------- for teacher forcing end -----------------
 
         hidden_states = self.norm(hidden_states)
@@ -957,7 +964,7 @@ class Qwen3VLTextModel(Qwen3VLPreTrainedModel):
             last_hidden_state=hidden_states,
             past_key_values=past_key_values,
             halting_scores=halting_scores,
-            remaining_scores=remaining_scores,
+            remaining_scores=p_t_list,
         )
 
     def _deepstack_process(

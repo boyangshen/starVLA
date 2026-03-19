@@ -46,7 +46,7 @@ class _LoopVLM_Interface(nn.Module):
         self.as_student = vlm_config.get("as_student", False)
         self.num_preserved_layers = vlm_config.get("num_preserved_layers", 24)
         self.num_loop = vlm_config.get("num_loop", 1)
-        self.stop_threshold = vlm_config.get("stop_threshold", 0.05)
+        self.stop_threshold = vlm_config.get("stop_threshold")
         
         model_config = Qwen3VLConfig.from_pretrained(model_id)
         model_config.use_teacher_llm = self.use_teacher_llm
