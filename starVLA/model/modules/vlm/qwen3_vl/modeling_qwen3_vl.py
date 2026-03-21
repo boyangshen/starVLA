@@ -786,7 +786,6 @@ class Qwen3VLTextModel(Qwen3VLPreTrainedModel):
                 nn.LayerNorm(config.hidden_size // 4),
                 nn.ReLU(),
                 nn.Linear(config.hidden_size // 4, 1),
-                nn.Sigmoid(),
             )
             self.stop_threshold = config.stop_threshold
 
@@ -949,12 +948,11 @@ class Qwen3VLTextModel(Qwen3VLPreTrainedModel):
 
             if self.as_student:
 
-                # ===== 1. λ_t =====
-                halting_score = torch.sigmoid(
-                    self.halting_projector(hidden_states[:, -1, :])
-                )  # [B, 1]
+                # ===== 1. λ_t (logits) =====
+                halting_score_logits = self.halting_projector(hidden_states[:, -1, :])  # [B, 1]
+                halting_score = torch.sigmoid(halting_score_logits)  # [B, 1]
 
-                halting_scores.append(halting_score)
+                halting_scores.append(halting_score_logits)
 
                 # ===== 2. 初始化 remaining_mass =====
                 if remaining_mass is None:

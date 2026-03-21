@@ -84,7 +84,7 @@ class LoopOFT(baseframework):
         self.l1_loss = nn.L1Loss(reduction='none')
         self.mse_loss = nn.MSELoss()
         
-        self._init_halting_projector(self.config.framework.qwenvl.num_loop)
+        self._init_halting_projector()
 
         self.use_teacher_llm = self.config.framework.use_teacher_llm
         self.computation_penalty_weight = self.config.framework.get("computation_penalty_weight", 0.0)
@@ -92,58 +92,39 @@ class LoopOFT(baseframework):
         self.initial_teacher_loss_weight = config.framework.get("teacher_loss_weight", 0.5)
         self.teacher_loss_weight = self.initial_teacher_loss_weight
         self.teacher_loss_decay_steps = config.framework.get("teacher_loss_decay_steps", 1000)
+        # Entropy loss parameters
+        self.use_entropy_loss = config.framework.get("use_entropy_loss", True)
+        self.halting_entropy_weight = self.config.framework.get("halting_entropy_weight", 0.0)
         # Loop effectiveness loss parameters
         self.use_loop_effectiveness_loss = config.framework.get("use_loop_effectiveness_loss", False)
+        self.loop_effectiveness_weight = config.framework.get("loop_effectiveness_weight", 1.0)
         self.loop_effectiveness_k = config.framework.get("loop_effectiveness_k", 1.0)
         self.loop_effectiveness_gamma = config.framework.get("loop_effectiveness_gamma", 0.0)
         self._optimizer_step = 0
         self._gradient_accumulation_steps = config.trainer.get("gradient_accumulation_steps", 1)
         self._forward_step_count = 0
 
-    def _init_halting_projector(self, Tmax):
+    def _init_halting_projector(self):
         lm = self.qwen_vl_interface.model.language_model
 
         if not hasattr(lm, "halting_projector"):
             return
 
         module = lm.halting_projector
-        last_linear = None
 
-        # ===== 1. 初始化权重（缩小scale，防止sigmoid饱和）=====
+        # ===== 1. 随机初始化 =====
         for m in module.modules():
             if isinstance(m, nn.Linear):
-                nn.init.xavier_uniform_(m.weight, gain=0.1)  # 🔥关键：缩小
-                nn.init.zeros_(m.bias)
-                last_linear = m
+                # 使用Xavier初始化，产生正负权重
+                nn.init.xavier_uniform_(m.weight)
+                # 偏置初始化为小的随机值
+                nn.init.normal_(m.bias, mean=0.0, std=0.01)
 
-            elif isinstance(m, nn.BatchNorm1d):
+            elif isinstance(m, nn.LayerNorm):
+                # LayerNorm权重初始化为1，保证输出范围
                 nn.init.ones_(m.weight)
+                # 偏置初始化为0
                 nn.init.zeros_(m.bias)
-
-        # ===== 2. 初始化bias（step-aware + 随机）=====
-        if last_linear is not None:
-            # 参数可以调
-            base = -2.0        # 初始更偏向继续
-            step_scale = 0.4   # 每步增加停止概率
-            noise_std = 0.1    # 小随机扰动
-
-            # 如果 bias 是标量（shared head）
-            if last_linear.bias.numel() == 1:
-                b = base + (Tmax / 2) * step_scale
-                b += torch.randn(1).item() * noise_std
-                nn.init.constant_(last_linear.bias, b)
-
-            # 如果 bias 是 per-step（少见但更强）
-            else:
-                bias = []
-                for t in range(Tmax):
-                    b = base + step_scale * t
-                    b += torch.randn(1).item() * noise_std
-                    bias.append(b)
-
-                last_linear.bias.data = torch.tensor(
-                    bias, device=last_linear.bias.device, dtype=last_linear.bias.dtype
-                )
 
     def forward(
         self,
@@ -201,9 +182,11 @@ class LoopOFT(baseframework):
         print(f"{remaining_scores=}")
 
         # remaining score entropy loss
-        p = remaining_scores.clamp(1e-6, 1.0)
-        entropy = -(p * torch.log(p)).sum(dim=1)
-        entropy_loss = -entropy.mean() * self.halting_entropy_weight
+        entropy_loss = 0.0
+        if self.use_entropy_loss:
+            p = remaining_scores.clamp(1e-6, 1.0)
+            entropy = -(p * torch.log(p)).sum(dim=1)
+            entropy_loss = -entropy.mean() * self.halting_entropy_weight
 
 
         with torch.autocast("cuda", dtype=torch.float32):
@@ -234,28 +217,30 @@ class LoopOFT(baseframework):
             # Loop effectiveness loss
             loop_effectiveness_loss = 0.0
             if self.use_loop_effectiveness_loss and action_losses.shape[1] > 1:
-                # Compute improvement: previous loss - current loss
+                # ===== 1. Δloss =====
                 improvement = action_losses[:, :-1] - action_losses[:, 1:]  # [B, num_loop-1]
-                improvement = improvement.detach()  # Detach to avoid gradient flow
-                
-                # Compute w_t = sigmoid(k * (I_t - gamma))
+                improvement = improvement.detach()  # ❗必须 detach
+
+                # ===== 2. w_t =====
                 k = self.loop_effectiveness_k
                 gamma = self.loop_effectiveness_gamma
                 w_t = torch.sigmoid(k * (improvement - gamma))  # [B, num_loop-1]
-                
-                # Compute target_stop = 1 - w_t
+
+                # ===== 3. target_stop =====
                 target_stop = 1 - w_t  # [B, num_loop-1]
+
+                # ===== 4. 正确的监督对象：λ_t =====
+                halting_scores_truncated = halting_scores[:, :action_losses.shape[1]-1]  # [B, num_loop-1]
+
+                # ===== 5. BCE =====
+                # halting_scores already contains logits, so no need for torch.logit
                 
-                # Compute cross entropy between remaining_scores and target_stop
-                # Take the first (num_loop-1) elements of remaining_scores
-                remaining_scores_truncated = remaining_scores[:, :action_losses.shape[1]-1]  # [B, num_loop-1]
-                
-                # Cross entropy loss
-                loop_effectiveness_loss = F.binary_cross_entropy(
-                    remaining_scores_truncated, 
+                # Use binary_cross_entropy_with_logits which is safe for autocast
+                loop_effectiveness_loss = F.binary_cross_entropy_with_logits(
+                    halting_scores_truncated, 
                     target_stop, 
                     reduction='mean'
-                )
+                ) * self.loop_effectiveness_weight
 
         teacher_loss = 0.0
         if self.use_teacher_llm and self.training:
