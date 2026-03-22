@@ -758,6 +758,139 @@ class Qwen3VLVisionModel(Qwen3VLPreTrainedModel):
 class HaltingModelOutputWithPast(BaseModelOutputWithPast):
     halting_scores: Optional[list[torch.FloatTensor]] = None
     remaining_scores: Optional[list[torch.FloatTensor]] = None
+    latent_logits_list: Optional[list[torch.FloatTensor]] = None
+
+
+class HaltingCrossAttentionLayer(nn.Module):
+    def __init__(self, hidden_size: int, num_heads: int = 8, dropout: float = 0.1):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.num_heads = num_heads
+        self.head_dim = hidden_size // num_heads
+
+        self.q_proj = nn.Linear(hidden_size, hidden_size)
+        self.k_proj = nn.Linear(hidden_size, hidden_size)
+        self.v_proj = nn.Linear(hidden_size, hidden_size)
+        self.o_proj = nn.Linear(hidden_size, hidden_size)
+
+        self.norm1 = nn.LayerNorm(hidden_size)
+        self.norm2 = nn.LayerNorm(hidden_size)
+
+        self.ffn = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size * 4),
+            nn.GELU(),
+            nn.Linear(hidden_size * 4, hidden_size),
+        )
+
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key_value: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        batch_size = query.shape[0]
+
+        residual = query
+        query = self.norm1(query)
+
+        q = self.q_proj(query).view(batch_size, -1, self.num_heads, self.head_dim).transpose(1, 2)
+        k = self.k_proj(key_value).view(batch_size, -1, self.num_heads, self.head_dim).transpose(1, 2)
+        v = self.v_proj(key_value).view(batch_size, -1, self.num_heads, self.head_dim).transpose(1, 2)
+
+        attn_weights = torch.matmul(q, k.transpose(-2, -1)) / (self.head_dim ** 0.5)
+
+        if attention_mask is not None:
+            attn_weights = attn_weights + attention_mask
+
+        attn_weights = F.softmax(attn_weights, dim=-1)
+        attn_weights = self.dropout(attn_weights)
+
+        attn_output = torch.matmul(attn_weights, v)
+        attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, -1, self.hidden_size)
+        attn_output = self.o_proj(attn_output)
+
+        query = residual + self.dropout(attn_output)
+
+        residual = query
+        query = self.norm2(query)
+        query = residual + self.dropout(self.ffn(query))
+
+        return query
+
+
+class HaltingModule(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.num_loop = config.num_loop
+        self.hidden_size = config.hidden_size
+        self.stop_threshold = getattr(config, 'stop_threshold', 0.1)
+        self.num_heads = getattr(config, 'halting_num_heads', 8)
+
+        self.max_position_embeddings = config.num_loop + 2
+        inv_freq = 1.0 / (10000 ** (torch.arange(0, config.hidden_size, 2).float() / config.hidden_size))
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+
+        self.cross_attn_layers = nn.ModuleList([
+            HaltingCrossAttentionLayer(config.hidden_size, self.num_heads)
+            for _ in range(2)
+        ])
+
+        self.latent_proj = nn.Linear(config.hidden_size * 3, config.hidden_size)
+        self.latent_norm = nn.LayerNorm(config.hidden_size)
+        self.halting_head = nn.Linear(config.hidden_size, 1)
+
+    def _get_loop_position_encoding(self, position: int, batch_size: int, device: torch.device) -> torch.Tensor:
+        position = torch.tensor([position], device=device)
+        inv_freq = self.inv_freq.to(device)
+
+        positions = position.unsqueeze(-1)
+        angles = positions * inv_freq
+
+        pe = torch.cat([torch.sin(angles), torch.cos(angles)], dim=-1)
+        return pe.repeat(batch_size, 1)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        loop_idx: int,
+        action_token_mask: Optional[torch.Tensor] = None,
+        remaining_mass: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        batch_size = hidden_states.shape[0]
+
+        loop_emb = self._get_loop_position_encoding(loop_idx + 1, batch_size, hidden_states.device)
+
+        query = hidden_states[:, -3:, :]
+        query = query + loop_emb.unsqueeze(1)
+
+        # if action_token_mask is not None:
+        #     key_value = hidden_states[action_token_mask].view(batch_size, -1, self.hidden_size)
+        # else:
+        key_value = hidden_states
+
+        for cross_attn_layer in self.cross_attn_layers:
+            query = cross_attn_layer(query, key_value)
+
+        latent = query.reshape(batch_size, -1)
+        latent = self.latent_proj(latent)
+        latent = self.latent_norm(latent)
+
+        halting_logits = self.halting_head(latent).squeeze(-1)
+
+        halting_score = torch.sigmoid(halting_logits)
+
+        if remaining_mass is None:
+            remaining_mass = torch.ones_like(halting_score)
+
+        p_t = halting_score * remaining_mass
+        remaining_mass = remaining_mass * (1.0 - halting_score)
+
+        return halting_score, p_t, remaining_mass, latent
+
+    def should_stop(self, remaining_mass: torch.Tensor) -> bool:
+        return (not self.training) and torch.all(remaining_mass < self.stop_threshold)
 
 
 @auto_docstring(
@@ -780,23 +913,7 @@ class Qwen3VLTextModel(Qwen3VLPreTrainedModel):
             self.num_preserved_layers = config.num_preserved_layers
             self.num_loop = config.num_loop
 
-            # loop embeddings for each iteration
-            self.loop_embeddings = nn.Embedding(self.num_loop, config.hidden_size)
-            
-            # halting projector with FiLM modulation
-            # Input: concat of 3 loop token hidden states [B, 3*D]
-            self.halting_projector = nn.Sequential(
-                nn.Linear(config.hidden_size * 3, config.hidden_size // 4),
-                nn.LayerNorm(config.hidden_size // 4),
-                nn.ReLU(),
-                nn.Linear(config.hidden_size // 4, 1),  # single halting logit
-            )
-            
-            # FiLM modulation layers - use current loop embedding
-            self.film_gamma = nn.Linear(config.hidden_size, config.hidden_size // 4)
-            self.film_beta = nn.Linear(config.hidden_size, config.hidden_size // 4)
-            
-            self.stop_threshold = config.stop_threshold
+            self.halting_module = HaltingModule(config)
 
         else:
             config.num_hidden_layers = 28
@@ -833,6 +950,8 @@ class Qwen3VLTextModel(Qwen3VLPreTrainedModel):
         # args for deepstack
         visual_pos_masks: Optional[torch.Tensor] = None,
         deepstack_visual_embeds: Optional[list[torch.Tensor]] = None,
+        # args for halting
+        action_token_mask: Optional[torch.Tensor] = None,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> Union[tuple, BaseModelOutputWithPast]:
         r"""
@@ -842,6 +961,8 @@ class Qwen3VLTextModel(Qwen3VLPreTrainedModel):
             The deepstack visual embeddings. The shape is (num_layers, visual_seqlen, embed_dim).
             The feature is extracted from the different visual encoder layers, and fed to the decoder
             hidden states. It's from the paper DeepStack(https://arxiv.org/abs/2406.04334).
+        action_token_mask (`torch.Tensor` of shape `(batch_size, seqlen)`, *optional*):
+            The mask of action tokens for halting cross attention.
         """
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
@@ -918,6 +1039,7 @@ class Qwen3VLTextModel(Qwen3VLPreTrainedModel):
 
         halting_scores = []
         p_t_list = []
+        latent_logits_list = []
 
         remaining_mass = None
 
@@ -956,46 +1078,14 @@ class Qwen3VLTextModel(Qwen3VLPreTrainedModel):
                 )
 
             if self.as_student:
-
-                # ===== 1. Get loop embedding =====
-                loop_emb = self.loop_embeddings(torch.tensor([loop_idx], device=hidden_states.device).repeat(hidden_states.shape[0]))  # [B, D]
-                
-                # ===== 2. λ_t (logits) with FiLM modulation =====
-                # Concatenate 3 loop token hidden states [B, 3*D]
-                # Last 3 tokens are the loop tokens
-                loop_token_hiddens = hidden_states[:, -3:, :]  # [B, 3, D]
-                loop_token_hiddens = loop_token_hiddens.reshape(hidden_states.shape[0], -1)  # [B, 3*D]
-                
-                # First layer of halting projector
-                x = self.halting_projector[0](loop_token_hiddens)  # [B, D//4]
-                
-                # FiLM modulation after first linear layer
-                gamma = self.film_gamma(loop_emb)  # [B, D//4]
-                beta = self.film_beta(loop_emb)    # [B, D//4]
-                x = x * gamma + beta  # FiLM modulation
-                
-                # Remaining layers
-                x = self.halting_projector[1](x)  # LayerNorm
-                x = self.halting_projector[2](x)  # ReLU
-                halting_score_logit = self.halting_projector[3](x)  # [B, 1]
-                
-                halting_score = torch.sigmoid(halting_score_logit)  # [B, 1]
-
-                halting_scores.append(halting_score_logit)
-
-                # ===== 2. 初始化 remaining_mass =====
-                if remaining_mass is None:
-                    remaining_mass = torch.ones_like(halting_score)
-
-                # ===== 3. 计算 p(t) =====
-                p_t = halting_score * remaining_mass
+                halting_score, p_t, remaining_mass, latent_logits = self.halting_module(
+                    hidden_states, loop_idx, action_token_mask, remaining_mass
+                )
+                halting_scores.append(halting_score)
                 p_t_list.append(p_t)
+                latent_logits_list.append(latent_logits)
 
-                # ===== 4. 更新 remaining_mass =====
-                remaining_mass = remaining_mass * (1.0 - halting_score)
-
-                # ===== 5. inference early stop =====
-                if (not self.training) and torch.all(remaining_mass < self.stop_threshold):
+                if self.halting_module.should_stop(remaining_mass):
                     break
 
         # ===== absorb remaining mass =====
@@ -1012,6 +1102,7 @@ class Qwen3VLTextModel(Qwen3VLPreTrainedModel):
             past_key_values=past_key_values,
             halting_scores=halting_scores,
             remaining_scores=p_t_list,
+            latent_logits_list=latent_logits_list if self.as_student else None,
         )
 
     def _deepstack_process(

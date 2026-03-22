@@ -150,14 +150,15 @@ class LoopOFT(baseframework):
         
         input_ids = qwen_inputs.get("input_ids")
         if input_ids is not None:
-            # Add 3 loop tokens
             loop_tokens = torch.tensor([self.loop_token_ids], dtype=input_ids.dtype, device=input_ids.device).expand(input_ids.shape[0], -1)
             qwen_inputs["input_ids"] = torch.cat([input_ids, loop_tokens], dim=1)
             if "attention_mask" in qwen_inputs:
                 attention_mask = qwen_inputs["attention_mask"]
                 ones = torch.ones((attention_mask.shape[0], 3), dtype=attention_mask.dtype, device=attention_mask.device)
                 qwen_inputs["attention_mask"] = torch.cat([attention_mask, ones], dim=1)
-    
+            action_token_mask = (qwen_inputs["input_ids"] == self.action_token_id)
+            qwen_inputs["action_token_mask"] = action_token_mask
+
         with torch.autocast("cuda", dtype=torch.bfloat16):
             qwenvl_outputs = self.qwen_vl_interface(
                 **qwen_inputs,
@@ -205,10 +206,12 @@ class LoopOFT(baseframework):
                 layer_loss = layer_loss.mean(dim=[1, 2])  # [B]
                 action_losses.append(layer_loss)
             
-            # Stack losses and apply remaining_scores weighting
+            # Stack losses and apply remaining_scores weighting (remaining_scores is already normalized [B, num_loop])
             action_losses = torch.stack(action_losses, dim=1)  # [B, num_loop]
-            action_loss = (action_losses * remaining_scores).sum(dim=1).mean()
-            
+            # action_loss = (action_losses * remaining_scores).sum(dim=1).mean()
+
+            action_loss = action_losses.mean()
+
             # Loop effectiveness loss
             loop_effectiveness_loss = 0.0
             if self.use_loop_effectiveness_loss and action_losses.shape[1] > 1:
@@ -226,8 +229,7 @@ class LoopOFT(baseframework):
                 # target_remaining_scores = torch.from_numpy(target_remaining_scores).to(goodness.device, dtype=goodness.dtype)
                 
                 # Compute KL divergence between target_remaining_scores and remaining_scores
-                # KL(P||Q) = sum(P * log(P/Q))
-                p = target_remaining_scores.clamp(1e-8, 1.0)  # target distribution
+                # KL(P||Q) = sum(P * log(P/Q))                p = target_remaining_scores.clamp(1e-8, 1.0)  # target distribution
                 q = remaining_scores.clamp(1e-8, 1.0)         # predicted distribution
                 kl_div = (p * torch.log(p / q)).sum(dim=1).mean()  # [B, num_loop] -> scalar
                 loop_effectiveness_loss = kl_div * self.loop_effectiveness_weight
@@ -296,6 +298,11 @@ class LoopOFT(baseframework):
                 attention_mask = qwen_inputs["attention_mask"]
                 ones = torch.ones((attention_mask.shape[0], 3), dtype=attention_mask.dtype, device=attention_mask.device)
                 qwen_inputs["attention_mask"] = torch.cat([attention_mask, ones], dim=1)
+
+            action_token_mask = torch.zeros_like(qwen_inputs["input_ids"], dtype=torch.bool)
+            if self.action_token_id is not None:
+                action_token_mask = (qwen_inputs["input_ids"] == self.action_token_id)
+            qwen_inputs["action_token_mask"] = action_token_mask
         
         with torch.autocast("cuda", dtype=torch.bfloat16):
             qwenvl_outputs = self.qwen_vl_interface(
@@ -307,7 +314,8 @@ class LoopOFT(baseframework):
             
             # 处理 loop 相关的 hidden states
             student_hidden_states = torch.stack(qwenvl_outputs.hidden_states, dim=1)
-            
+            logger.info(f"student_hidden_states shape: {student_hidden_states.shape}")
+
             # 推理时只使用最后一个 hidden state
             tmp_hidden_states = student_hidden_states[:,5::self.qwen_vl_interface.num_preserved_layers]
             student_last_hidden = tmp_hidden_states[:, -1, :, :]  # [B, S, H]
@@ -636,3 +644,5 @@ if __name__ == "__main__":
     breakpoint()
     model = LoopOFT(config=cfg)
     print("✅ LoopOFT model created successfully")
+
+
