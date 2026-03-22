@@ -780,13 +780,22 @@ class Qwen3VLTextModel(Qwen3VLPreTrainedModel):
             self.num_preserved_layers = config.num_preserved_layers
             self.num_loop = config.num_loop
 
-            # halting projector
+            # loop embeddings for each iteration
+            self.loop_embeddings = nn.Embedding(self.num_loop, config.hidden_size)
+            
+            # halting projector with FiLM modulation
+            # Input: concat of 3 loop token hidden states [B, 3*D]
             self.halting_projector = nn.Sequential(
-                nn.Linear(config.hidden_size, config.hidden_size // 4),
+                nn.Linear(config.hidden_size * 3, config.hidden_size // 4),
                 nn.LayerNorm(config.hidden_size // 4),
                 nn.ReLU(),
-                nn.Linear(config.hidden_size // 4, 1),
+                nn.Linear(config.hidden_size // 4, 1),  # single halting logit
             )
+            
+            # FiLM modulation layers - use current loop embedding
+            self.film_gamma = nn.Linear(config.hidden_size, config.hidden_size // 4)
+            self.film_beta = nn.Linear(config.hidden_size, config.hidden_size // 4)
+            
             self.stop_threshold = config.stop_threshold
 
         else:
@@ -948,11 +957,31 @@ class Qwen3VLTextModel(Qwen3VLPreTrainedModel):
 
             if self.as_student:
 
-                # ===== 1. λ_t (logits) =====
-                halting_score_logits = self.halting_projector(hidden_states[:, -1, :])  # [B, 1]
-                halting_score = torch.sigmoid(halting_score_logits)  # [B, 1]
+                # ===== 1. Get loop embedding =====
+                loop_emb = self.loop_embeddings(torch.tensor([loop_idx], device=hidden_states.device).repeat(hidden_states.shape[0]))  # [B, D]
+                
+                # ===== 2. λ_t (logits) with FiLM modulation =====
+                # Concatenate 3 loop token hidden states [B, 3*D]
+                # Last 3 tokens are the loop tokens
+                loop_token_hiddens = hidden_states[:, -3:, :]  # [B, 3, D]
+                loop_token_hiddens = loop_token_hiddens.reshape(hidden_states.shape[0], -1)  # [B, 3*D]
+                
+                # First layer of halting projector
+                x = self.halting_projector[0](loop_token_hiddens)  # [B, D//4]
+                
+                # FiLM modulation after first linear layer
+                gamma = self.film_gamma(loop_emb)  # [B, D//4]
+                beta = self.film_beta(loop_emb)    # [B, D//4]
+                x = x * gamma + beta  # FiLM modulation
+                
+                # Remaining layers
+                x = self.halting_projector[1](x)  # LayerNorm
+                x = self.halting_projector[2](x)  # ReLU
+                halting_score_logit = self.halting_projector[3](x)  # [B, 1]
+                
+                halting_score = torch.sigmoid(halting_score_logit)  # [B, 1]
 
-                halting_scores.append(halting_score_logits)
+                halting_scores.append(halting_score_logit)
 
                 # ===== 2. 初始化 remaining_mass =====
                 if remaining_mass is None:
