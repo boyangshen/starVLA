@@ -79,9 +79,6 @@ class LoopOFT(baseframework):
         
         self.action_token = "🔍"
         self.action_token_id = self.qwen_vl_interface.processor.tokenizer("🔍", add_special_tokens=False)["input_ids"][0]
-        
-        # 3 loop tokens with fixed IDs
-        self.loop_token_ids = [140000, 140001, 140002]
 
         self.l1_loss = nn.L1Loss(reduction='none')
         self.mse_loss = nn.MSELoss()
@@ -150,14 +147,12 @@ class LoopOFT(baseframework):
         
         input_ids = qwen_inputs.get("input_ids")
         if input_ids is not None:
-            loop_tokens = torch.tensor([self.loop_token_ids], dtype=input_ids.dtype, device=input_ids.device).expand(input_ids.shape[0], -1)
-            qwen_inputs["input_ids"] = torch.cat([input_ids, loop_tokens], dim=1)
-            if "attention_mask" in qwen_inputs:
-                attention_mask = qwen_inputs["attention_mask"]
-                ones = torch.ones((attention_mask.shape[0], 3), dtype=attention_mask.dtype, device=attention_mask.device)
-                qwen_inputs["attention_mask"] = torch.cat([attention_mask, ones], dim=1)
-            action_token_mask = (qwen_inputs["input_ids"] == self.action_token_id)
+            action_token_mask = (input_ids == self.action_token_id)
             qwen_inputs["action_token_mask"] = action_token_mask
+            image_token_id = self.qwen_vl_interface.model.config.image_token_id
+            video_token_id = self.qwen_vl_interface.model.config.video_token_id
+            visual_pos_masks = (input_ids == image_token_id) | (input_ids == video_token_id)
+            qwen_inputs["visual_pos_masks"] = visual_pos_masks
 
         with torch.autocast("cuda", dtype=torch.bfloat16):
             qwenvl_outputs = self.qwen_vl_interface(
@@ -289,20 +284,16 @@ class LoopOFT(baseframework):
 
         qwen_inputs = self.qwen_vl_interface.build_qwenvl_inputs(images=batch_images, instructions=instructions)
         
-        # 添加 3 个 loop token
         input_ids = qwen_inputs.get("input_ids")
         if input_ids is not None:
-            loop_tokens = torch.tensor([self.loop_token_ids], dtype=input_ids.dtype, device=input_ids.device).expand(input_ids.shape[0], -1)
-            qwen_inputs["input_ids"] = torch.cat([input_ids, loop_tokens], dim=1)
-            if "attention_mask" in qwen_inputs:
-                attention_mask = qwen_inputs["attention_mask"]
-                ones = torch.ones((attention_mask.shape[0], 3), dtype=attention_mask.dtype, device=attention_mask.device)
-                qwen_inputs["attention_mask"] = torch.cat([attention_mask, ones], dim=1)
-
-            action_token_mask = torch.zeros_like(qwen_inputs["input_ids"], dtype=torch.bool)
+            action_token_mask = torch.zeros_like(input_ids, dtype=torch.bool)
             if self.action_token_id is not None:
-                action_token_mask = (qwen_inputs["input_ids"] == self.action_token_id)
+                action_token_mask = (input_ids == self.action_token_id)
             qwen_inputs["action_token_mask"] = action_token_mask
+            image_token_id = self.qwen_vl_interface.model.config.image_token_id
+            video_token_id = self.qwen_vl_interface.model.config.video_token_id
+            visual_pos_masks = (input_ids == image_token_id) | (input_ids == video_token_id)
+            qwen_inputs["visual_pos_masks"] = visual_pos_masks
         
         with torch.autocast("cuda", dtype=torch.bfloat16):
             qwenvl_outputs = self.qwen_vl_interface(
@@ -312,7 +303,6 @@ class LoopOFT(baseframework):
                 return_dict=True,
             )
             
-            # 处理 loop 相关的 hidden states
             student_hidden_states = torch.stack(qwenvl_outputs.hidden_states, dim=1)
             logger.info(f"student_hidden_states shape: {student_hidden_states.shape}")
 

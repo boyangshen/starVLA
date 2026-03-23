@@ -832,6 +832,8 @@ class HaltingModule(nn.Module):
         inv_freq = 1.0 / (10000 ** (torch.arange(0, config.hidden_size, 2).float() / config.hidden_size))
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
+        self.halting_query_tokens = nn.Parameter(torch.randn(3, config.hidden_size))
+
         self.cross_attn_layers = nn.ModuleList([
             HaltingCrossAttentionLayer(config.hidden_size, self.num_heads)
             for _ in range(2)
@@ -856,19 +858,21 @@ class HaltingModule(nn.Module):
         hidden_states: torch.Tensor,
         loop_idx: int,
         action_token_mask: Optional[torch.Tensor] = None,
+        visual_pos_masks: Optional[torch.Tensor] = None,
         remaining_mass: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         batch_size = hidden_states.shape[0]
 
         loop_emb = self._get_loop_position_encoding(loop_idx + 1, batch_size, hidden_states.device)
 
-        query = hidden_states[:, -3:, :]
+        query = self.halting_query_tokens.unsqueeze(0).expand(batch_size, -1, -1)
         query = query + loop_emb.unsqueeze(1)
 
-        # if action_token_mask is not None:
-        #     key_value = hidden_states[action_token_mask].view(batch_size, -1, self.hidden_size)
-        # else:
-        key_value = hidden_states
+        combined_mask = action_token_mask | visual_pos_masks if visual_pos_masks is not None else action_token_mask
+        if combined_mask is not None:
+            key_value = hidden_states[combined_mask].view(batch_size, -1, self.hidden_size)
+        else:
+            key_value = hidden_states
 
         for cross_attn_layer in self.cross_attn_layers:
             query = cross_attn_layer(query, key_value)
@@ -1079,7 +1083,7 @@ class Qwen3VLTextModel(Qwen3VLPreTrainedModel):
 
             if self.as_student:
                 halting_score, p_t, remaining_mass, latent_logits = self.halting_module(
-                    hidden_states, loop_idx, action_token_mask, remaining_mass
+                    hidden_states, loop_idx, action_token_mask, visual_pos_masks, remaining_mass
                 )
                 halting_scores.append(halting_score)
                 p_t_list.append(p_t)
