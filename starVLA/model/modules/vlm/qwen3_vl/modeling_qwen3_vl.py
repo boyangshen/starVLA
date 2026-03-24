@@ -826,19 +826,21 @@ class HaltingModule(nn.Module):
         super().__init__()
         self.num_loop = config.num_loop
         self.hidden_size = config.hidden_size
-        self.stop_threshold = getattr(config, 'stop_threshold', 0.1)
+        self.stop_threshold = getattr(config, 'stop_threshold', 0.15)
         self.num_heads = getattr(config, 'halting_num_heads', 8)
+        self.halting_query_num = getattr(config, 'halting_query_num', 3)
 
         self.max_position_embeddings = config.num_loop + 2
         inv_freq = 1.0 / (10000 ** (torch.arange(0, config.hidden_size, 2).float() / config.hidden_size))
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
+        self.halting_cross_attn_layers = getattr(config, 'halting_cross_attn_layers', 2)
         self.cross_attn_layers = nn.ModuleList([
             HaltingCrossAttentionLayer(config.hidden_size, self.num_heads)
-            for _ in range(2)
+            for _ in range(self.halting_cross_attn_layers)
         ])
 
-        self.latent_proj = nn.Linear(config.hidden_size * 3, config.hidden_size)
+        self.latent_proj = nn.Linear(config.hidden_size * self.halting_query_num, config.hidden_size)
         self.latent_norm = nn.LayerNorm(config.hidden_size)
         self.halting_head = nn.Linear(config.hidden_size, 1)
 
@@ -867,14 +869,16 @@ class HaltingModule(nn.Module):
         query = hidden_states[:, -3:, :]
         query = query + loop_emb.unsqueeze(1)
 
-        if action_token_mask is not None and visual_pos_masks is not None:
-            visual_tokens = hidden_states[visual_pos_masks].view(batch_size, -1, self.hidden_size)
-            action_tokens = hidden_states[action_token_mask].view(batch_size, -1, self.hidden_size)
-            key_value = torch.cat([visual_tokens, action_tokens], dim=1)
-        elif action_token_mask is not None:
-            key_value = hidden_states[action_token_mask].view(batch_size, -1, self.hidden_size)
-        else:
-            key_value = hidden_states
+        key_value = hidden_states[action_token_mask].view(batch_size, -1, self.hidden_size)
+        
+        # if action_token_mask is not None and visual_pos_masks is not None:
+        #     visual_tokens = hidden_states[visual_pos_masks].view(batch_size, -1, self.hidden_size)
+        #     action_tokens = hidden_states[action_token_mask].view(batch_size, -1, self.hidden_size)
+        #     key_value = torch.cat([visual_tokens, action_tokens], dim=1)
+        # elif action_token_mask is not None:
+        #     key_value = hidden_states[action_token_mask].view(batch_size, -1, self.hidden_size)
+        # else:
+        #     key_value = hidden_states
 
         for cross_attn_layer in self.cross_attn_layers:
             query = cross_attn_layer(query, key_value)
@@ -896,9 +900,14 @@ class HaltingModule(nn.Module):
         return halting_score, p_t, remaining_mass, latent
 
     def should_stop(self, remaining_mass: torch.Tensor, halting_score: torch.Tensor) -> bool:
-        return (not self.training) and (
-            torch.all(halting_score > 0.45) or 
-            torch.all(remaining_mass < 0.15)
+        if self.training:
+            return False
+        avg_prob = 1.0 / self.num_loop
+        e = 2.71828
+        return (
+            torch.all(halting_score > 0.5) or
+            torch.all(remaining_mass < self.stop_threshold) or
+            torch.all(halting_score > avg_prob * e)
         )
 
 
@@ -1477,7 +1486,6 @@ class Qwen3VLModel(Qwen3VLPreTrainedModel):
         #         **kwargs
         #     )
         #=============== for teacher forcing end ==================
-
         outputs = self.language_model(
             input_ids=None,
             position_ids=position_ids,
@@ -1487,7 +1495,7 @@ class Qwen3VLModel(Qwen3VLPreTrainedModel):
             cache_position=cache_position,
             visual_pos_masks=visual_pos_masks,
             deepstack_visual_embeds=deepstack_visual_embeds,
-            **kwargs,
+            **{k: v for k, v in kwargs.items() if k not in ['visual_pos_masks', 'deepstack_visual_embeds']},
         )
 
         return HaltingQwen3VLModelOutputWithPast(
