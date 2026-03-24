@@ -543,6 +543,7 @@ class HaltingQwen3VLModelOutputWithPast(ModelOutput):
     rope_deltas: Optional[torch.LongTensor] = None
     halting_scores: Optional[list[torch.FloatTensor]] = None
     remaining_scores: Optional[list[torch.FloatTensor]] = None
+    latent_logits_list: Optional[list[torch.FloatTensor]] = None
 
 
 @auto_docstring
@@ -857,6 +858,7 @@ class HaltingModule(nn.Module):
         self,
         hidden_states: torch.Tensor,
         loop_idx: int,
+        visual_pos_masks: Optional[torch.Tensor] = None,
         action_token_mask: Optional[torch.Tensor] = None,
         visual_pos_masks: Optional[torch.Tensor] = None,
         remaining_mass: Optional[torch.Tensor] = None,
@@ -868,9 +870,12 @@ class HaltingModule(nn.Module):
         query = self.halting_query_tokens.unsqueeze(0).expand(batch_size, -1, -1)
         query = query + loop_emb.unsqueeze(1)
 
-        combined_mask = action_token_mask | visual_pos_masks if visual_pos_masks is not None else action_token_mask
-        if combined_mask is not None:
-            key_value = hidden_states[combined_mask].view(batch_size, -1, self.hidden_size)
+        if action_token_mask is not None and visual_pos_masks is not None:
+            visual_tokens = hidden_states[visual_pos_masks].view(batch_size, -1, self.hidden_size)
+            action_tokens = hidden_states[action_token_mask].view(batch_size, -1, self.hidden_size)
+            key_value = torch.cat([visual_tokens, action_tokens], dim=1)
+        elif action_token_mask is not None:
+            key_value = hidden_states[action_token_mask].view(batch_size, -1, self.hidden_size)
         else:
             key_value = hidden_states
 
@@ -893,8 +898,11 @@ class HaltingModule(nn.Module):
 
         return halting_score, p_t, remaining_mass, latent
 
-    def should_stop(self, remaining_mass: torch.Tensor) -> bool:
-        return (not self.training) and torch.all(remaining_mass < self.stop_threshold)
+    def should_stop(self, remaining_mass: torch.Tensor, halting_score: torch.Tensor) -> bool:
+        return (not self.training) and (
+            torch.all(halting_score > 0.45) or 
+            torch.all(remaining_mass < 0.15)
+        )
 
 
 @auto_docstring(
@@ -1058,16 +1066,16 @@ class Qwen3VLTextModel(Qwen3VLPreTrainedModel):
 
         for loop_idx in range(self.num_loop):
 
-            # ===== split vision tokens and concat with detached hidden states =====
-            if visual_pos_masks is not None:
-                # Create a new tensor that only detaches text tokens, keeps vision tokens
-                # visual_pos_masks: [B, L], hidden_states: [B, L, D]
-                # Invert mask: True for text tokens, False for vision tokens
-                text_mask = ~visual_pos_masks  # [B, L]
-                # Create a copy to avoid inplace operation
-                hidden_states = hidden_states.clone()
-                # Detach only text positions
-                hidden_states[text_mask] = hidden_states[text_mask].detach()
+            # # ===== split vision tokens and concat with detached hidden states =====
+            # if visual_pos_masks is not None:
+            #     # Create a new tensor that only detaches text tokens, keeps vision tokens
+            #     # visual_pos_masks: [B, L], hidden_states: [B, L, D]
+            #     # Invert mask: True for text tokens, False for vision tokens
+            #     text_mask = ~visual_pos_masks  # [B, L]
+            #     # Create a copy to avoid inplace operation
+            #     hidden_states = hidden_states.clone()
+            #     # Detach only text positions
+            #     hidden_states[text_mask] = hidden_states[text_mask].detach()
 
             # ===== transformer forward =====
             for offset in range(self.num_preserved_layers):
@@ -1083,13 +1091,13 @@ class Qwen3VLTextModel(Qwen3VLPreTrainedModel):
 
             if self.as_student:
                 halting_score, p_t, remaining_mass, latent_logits = self.halting_module(
-                    hidden_states, loop_idx, action_token_mask, visual_pos_masks, remaining_mass
+                    hidden_states, loop_idx, visual_pos_masks, action_token_mask, remaining_mass
                 )
                 halting_scores.append(halting_score)
                 p_t_list.append(p_t)
                 latent_logits_list.append(latent_logits)
 
-                if self.halting_module.should_stop(remaining_mass):
+                if self.halting_module.should_stop(remaining_mass, halting_score):
                     break
 
         # ===== absorb remaining mass =====
@@ -1491,6 +1499,7 @@ class Qwen3VLModel(Qwen3VLPreTrainedModel):
             rope_deltas=self.rope_deltas,
             halting_scores=outputs.halting_scores,
             remaining_scores=outputs.remaining_scores,
+            latent_logits_list=outputs.latent_logits_list if hasattr(outputs, 'latent_logits_list') else None,
         )
 
         #=============== for teacher forcing start ==================
@@ -1588,6 +1597,7 @@ class Qwen3VLCausalLMOutputWithPast(ModelOutput):
     rope_deltas: Optional[torch.LongTensor] = None
     halting_scores: Optional[torch.FloatTensor] = None
     remaining_scores: Optional[torch.FloatTensor] = None
+    latent_logits_list: Optional[list[torch.FloatTensor]] = None
 
 class Qwen3VLForConditionalGeneration(Qwen3VLPreTrainedModel, GenerationMixin):
     _checkpoint_conversion_mapping = {}
@@ -1693,6 +1703,7 @@ class Qwen3VLForConditionalGeneration(Qwen3VLPreTrainedModel, GenerationMixin):
             rope_deltas=outputs.rope_deltas,
             halting_scores=outputs.halting_scores,
             remaining_scores=outputs.remaining_scores,
+            latent_logits_list=outputs.latent_logits_list if hasattr(outputs, 'latent_logits_list') else None,
         )
 
     def prepare_inputs_for_generation(

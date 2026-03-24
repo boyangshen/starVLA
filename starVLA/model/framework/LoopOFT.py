@@ -86,7 +86,6 @@ class LoopOFT(baseframework):
         self._init_halting_projector()
 
         self.use_teacher_llm = self.config.framework.use_teacher_llm
-        self.computation_penalty_weight = self.config.framework.get("computation_penalty_weight", 0.0)
         self.halting_entropy_weight = self.config.framework.get("halting_entropy_weight", 0.0)
         self.initial_teacher_loss_weight = config.framework.get("teacher_loss_weight", 0.5)
         self.teacher_loss_weight = self.initial_teacher_loss_weight
@@ -97,11 +96,14 @@ class LoopOFT(baseframework):
         # Loop effectiveness loss parameters
         self.use_loop_effectiveness_loss = config.framework.get("use_loop_effectiveness_loss", False)
         self.loop_effectiveness_weight = config.framework.get("loop_effectiveness_weight", 1.0)
-        # self.loop_effectiveness_k = config.framework.get("loop_effectiveness_k", 1.0)
-        # self.loop_effectiveness_gamma = config.framework.get("loop_effectiveness_gamma", 0.0)
-        self.kde_distribution_transformer = KDEDistributionTransformer(
-            num_bins=config.framework.qwenvl.get("num_loop", 6)
-        )
+
+
+        # self.kde_distribution_transformer = KDEDistributionTransformer(
+        #     num_bins=config.framework.qwenvl.get("num_loop", 6)
+        # )
+        # Cosine similarity loss parameter
+        self.use_cosine_loss = config.framework.get("use_cosine_loss", False)
+        self.cosine_loss_weight = config.framework.get("cosine_loss_weight", 0.2)
 
 
         self._optimizer_step = 0
@@ -224,10 +226,32 @@ class LoopOFT(baseframework):
                 # target_remaining_scores = torch.from_numpy(target_remaining_scores).to(goodness.device, dtype=goodness.dtype)
                 
                 # Compute KL divergence between target_remaining_scores and remaining_scores
-                # KL(P||Q) = sum(P * log(P/Q))                p = target_remaining_scores.clamp(1e-8, 1.0)  # target distribution
+                # KL(P||Q) = sum(P * log(P/Q))
+                p = target_remaining_scores.clamp(1e-8, 1.0)  # target distribution
                 q = remaining_scores.clamp(1e-8, 1.0)         # predicted distribution
                 kl_div = (p * torch.log(p / q)).sum(dim=1).mean()  # [B, num_loop] -> scalar
                 loop_effectiveness_loss = kl_div * self.loop_effectiveness_weight
+
+            # cosine similarity loss
+            cosine_loss = 0.0
+            if self.use_cosine_loss and hasattr(qwenvl_outputs, 'latent_logits_list') and qwenvl_outputs.latent_logits_list:
+                latent = torch.stack(qwenvl_outputs.latent_logits_list, dim=1)  # [B, L, D]
+                if latent.shape[1] > 1:
+                    # Normalize latent vectors
+                    latent_norm = F.normalize(latent, dim=-1)  # [B, L, D]
+                    
+                    # Compute pairwise cosine similarity using matrix multiplication
+                    # similarity matrix shape: [B, L, L]
+                    similarity_matrix = torch.matmul(latent_norm, latent_norm.transpose(1, 2))
+                    
+                    # Create a mask to exclude diagonal (self-similarity) and lower triangle (duplicates)
+                    L = latent.shape[1]
+                    mask = torch.triu(torch.ones(L, L, device=latent.device), diagonal=1).bool()
+                    
+                    # Apply mask and compute mean similarity
+                    cosine_sim = similarity_matrix[:, mask]  # [B, L*(L-1)/2]
+                    # Compute loss (encourage diversity, discourage high similarity)
+                    cosine_loss = cosine_sim.mean()
 
         teacher_loss = 0.0
         if self.use_teacher_llm and self.training:
@@ -250,16 +274,17 @@ class LoopOFT(baseframework):
                 teacher_loss = self.mse_loss(student_hidden_states, teacher_hidden_states)
                 weighted_teacher_loss = self.teacher_loss_weight * teacher_loss
                 
-            total_loss = action_loss + weighted_teacher_loss + entropy_loss + loop_effectiveness_loss
+            total_loss = action_loss + weighted_teacher_loss + entropy_loss + loop_effectiveness_loss + cosine_loss
 
         else:
-            total_loss = action_loss + entropy_loss + loop_effectiveness_loss
+            total_loss = action_loss + entropy_loss + loop_effectiveness_loss + cosine_loss * self.cosine_loss_weight
 
         return {
             "action_loss": action_loss,
             "teacher_loss": teacher_loss,
             "entropy_loss": entropy_loss,
             "loop_effectiveness_loss": loop_effectiveness_loss,
+            "cosine_loss": cosine_loss,
             "teacher_loss_weight": self.teacher_loss_weight,
             "total_loss": total_loss,
         }
