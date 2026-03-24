@@ -86,7 +86,6 @@ class LoopOFT(baseframework):
         self._init_halting_projector()
 
         self.use_teacher_llm = self.config.framework.use_teacher_llm
-        self.halting_entropy_weight = self.config.framework.get("halting_entropy_weight", 0.0)
         self.initial_teacher_loss_weight = config.framework.get("teacher_loss_weight", 0.5)
         self.teacher_loss_weight = self.initial_teacher_loss_weight
         self.teacher_loss_decay_steps = config.framework.get("teacher_loss_decay_steps", 1000)
@@ -105,6 +104,9 @@ class LoopOFT(baseframework):
         self.use_cosine_loss = config.framework.get("use_cosine_loss", False)
         self.cosine_loss_weight = config.framework.get("cosine_loss_weight", 0.2)
 
+        # Loss update counter parameters
+        self.max_loss_updates = config.framework.get("max_loss_updates", 10000)
+        self._loss_update_count = 0
 
         self._optimizer_step = 0
         self._gradient_accumulation_steps = config.trainer.get("gradient_accumulation_steps", 1)
@@ -174,9 +176,17 @@ class LoopOFT(baseframework):
 
         print(f"{remaining_scores=}")
 
+        # Update loss update counter
+        self._forward_step_count += 1
+        if self._forward_step_count % self._gradient_accumulation_steps == 0:
+            self._loss_update_count += 1
+
+        # Check if max loss updates reached
+        loss_updates_reached = self._loss_update_count >= self.max_loss_updates
+
         # remaining score entropy loss
         entropy_loss = 0.0
-        if self.use_entropy_loss:
+        if self.use_entropy_loss and not loss_updates_reached:
             p = remaining_scores.clamp(1e-6, 1.0)
             entropy = -(p * torch.log(p)).sum(dim=1)
             entropy_loss = -entropy.mean() * self.halting_entropy_weight
@@ -234,7 +244,7 @@ class LoopOFT(baseframework):
 
             # cosine similarity loss
             cosine_loss = 0.0
-            if self.use_cosine_loss and hasattr(qwenvl_outputs, 'latent_logits_list') and qwenvl_outputs.latent_logits_list:
+            if self.use_cosine_loss and not loss_updates_reached and hasattr(qwenvl_outputs, 'latent_logits_list') and qwenvl_outputs.latent_logits_list:
                 latent = torch.stack(qwenvl_outputs.latent_logits_list, dim=1)  # [B, L, D]
                 if latent.shape[1] > 1:
                     # Normalize latent vectors
@@ -255,7 +265,6 @@ class LoopOFT(baseframework):
 
         teacher_loss = 0.0
         if self.use_teacher_llm and self.training:
-            self._forward_step_count += 1
             if self._forward_step_count % self._gradient_accumulation_steps == 0:
                 self._optimizer_step += 1
                 if self._optimizer_step >= self.teacher_loss_decay_steps:
