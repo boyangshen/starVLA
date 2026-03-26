@@ -349,10 +349,22 @@ class LoopOFT(baseframework):
             # 处理 loop 相关的 hidden states
             student_hidden_states = torch.stack(qwenvl_outputs.hidden_states, dim=1)
             logger.info(f"student_hidden_states shape: {student_hidden_states.shape}")
-
-            # 推理时只使用最后一个 hidden state
+            
+            # 获取 remaining_scores
+            remaining_scores = torch.stack(qwenvl_outputs.remaining_scores, dim=1).squeeze(-1)
+            
+            # 确保 remaining_scores 至少有2个维度 (B, L)
+            if remaining_scores.dim() == 1:
+                remaining_scores = remaining_scores.unsqueeze(0)
+            
+            # 推理时根据 remaining_scores 选择概率最大的位置对应的 hidden state
             tmp_hidden_states = student_hidden_states[:,5::self.qwen_vl_interface.num_preserved_layers]
-            student_last_hidden = tmp_hidden_states[:, -1, :, :]  # [B, S, H]
+            
+            # 找到每个样本中 remaining_scores 最大的索引
+            max_indices = torch.argmax(remaining_scores, dim=1)  # [B]
+            
+            # 根据最大索引选择对应的 hidden state
+            student_last_hidden = torch.stack([tmp_hidden_states[i, max_indices[i], :, :] for i in range(tmp_hidden_states.shape[0])], dim=0)  # [B, S, H]
 
         with torch.autocast("cuda", dtype=torch.float32):
             input_ids = qwen_inputs.get("input_ids", None)

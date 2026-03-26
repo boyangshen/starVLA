@@ -899,15 +899,12 @@ class HaltingModule(nn.Module):
 
         return halting_score, p_t, remaining_mass, latent
 
-    def should_stop(self, remaining_mass: torch.Tensor, halting_score: torch.Tensor) -> bool:
+    def should_stop(self, remaining_mass: torch.Tensor, halting_score: torch.Tensor, p_t: torch.Tensor) -> bool:
         if self.training:
             return False
-        avg_prob = 1.0 / self.num_loop
-        e = 2.71828
         return (
-            torch.all(halting_score > 0.5) or
             torch.all(remaining_mass < self.stop_threshold) or
-            torch.all(halting_score > avg_prob * e)
+            torch.all(p_t > remaining_mass)
         )
 
 
@@ -1103,7 +1100,7 @@ class Qwen3VLTextModel(Qwen3VLPreTrainedModel):
                 p_t_list.append(p_t)
                 latent_logits_list.append(latent_logits)
 
-                if self.halting_module.should_stop(remaining_mass, halting_score):
+                if self.halting_module.should_stop(remaining_mass, halting_score, p_t):
                     break
 
         # ===== absorb remaining mass =====

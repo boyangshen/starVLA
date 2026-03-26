@@ -94,6 +94,8 @@ def eval_libero(args: Args) -> None:
 
     # Start evaluation
     total_episodes, total_successes = 0, 0
+    forward_times = []
+    
     for task_id in tqdm.tqdm(range(num_tasks_in_suite)):
         # Get task
         task = task_suite.get_task(task_id)
@@ -175,7 +177,12 @@ def eval_libero(args: Args) -> None:
                 response = client_model.step(example=example_dict, step=step) 
                 
                 end_time = time.time()
-                # print(f"time: {end_time - start_time}")
+                forward_time = end_time - start_time
+                forward_times.append(forward_time)
+                
+                if len(forward_times) % 10 == 0:
+                    avg_time = np.mean(forward_times[-10:])
+                    logging.info(f"Last 10 steps average forward time: {avg_time:.4f}s")
                 
                 # # 
                 raw_action = response["raw_action"]
@@ -244,6 +251,18 @@ def eval_libero(args: Args) -> None:
         f"Total success rate: {float(total_successes) / float(total_episodes)}"
     )
     logging.info(f"Total episodes: {total_episodes}")
+    
+    if forward_times:
+        avg_forward_time = np.mean(forward_times)
+        std_forward_time = np.std(forward_times)
+        min_forward_time = np.min(forward_times)
+        max_forward_time = np.max(forward_times)
+        logging.info(f"Forward time statistics:")
+        logging.info(f"  Average: {avg_forward_time:.4f}s")
+        logging.info(f"  Std: {std_forward_time:.4f}s")
+        logging.info(f"  Min: {min_forward_time:.4f}s")
+        logging.info(f"  Max: {max_forward_time:.4f}s")
+        logging.info(f"  Total forward steps: {len(forward_times)}")
 
 
 def _get_libero_env(task, resolution, seed):
