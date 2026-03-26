@@ -83,6 +83,7 @@ class SimulationInferenceEnv:
         """Initialize the simulation client with a model."""
         self.model = model
         self.env = None
+        self.forward_times = []
 
     def get_action(self, observations: Dict[str, Any]) -> Dict[str, Any]:
         """Get action from the model based on observations."""
@@ -139,6 +140,8 @@ class SimulationInferenceEnv:
         completed_episodes = 0
         current_successes = [False] * config.n_envs
         episode_successes = []
+        # 重置统计列表
+        self.forward_times = []
         # Initial environment reset
         obs, _ = self.env.reset()
         # Main simulation loop
@@ -169,6 +172,21 @@ class SimulationInferenceEnv:
         print(
             f"Collecting {config.n_episodes} episodes took {time.time() - start_time:.2f} seconds"
         )
+        
+        # 统计 forward 时间
+        if self.forward_times:
+            import numpy as np
+            avg_forward_time = np.mean(self.forward_times)
+            std_forward_time = np.std(self.forward_times)
+            min_forward_time = np.min(self.forward_times)
+            max_forward_time = np.max(self.forward_times)
+            print(f"Forward time statistics:")
+            print(f"  Average: {avg_forward_time:.4f}s")
+            print(f"  Std: {std_forward_time:.4f}s")
+            print(f"  Min: {min_forward_time:.4f}s")
+            print(f"  Max: {max_forward_time:.4f}s")
+            print(f"  Total forward steps: {len(self.forward_times)}")
+        
         assert (
             len(episode_successes) >= config.n_episodes
         ), f"Expected at least {config.n_episodes} episodes, got {len(episode_successes)}"
@@ -183,6 +201,9 @@ class SimulationInferenceEnv:
             actions = action_dict["actions"]
         else:
             actions = action_dict
+        # Get forward time from the response
+        if "forward_time" in action_dict:
+            self.forward_times.append(action_dict["forward_time"])
         # Add batch dimension to actions
         return actions
 

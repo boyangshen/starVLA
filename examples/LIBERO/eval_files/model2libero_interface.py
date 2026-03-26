@@ -111,13 +111,27 @@ class ModelClient:
         
 
         action_chunk_size = self.action_chunk_size
+        forward_time = 0.0
         if step % action_chunk_size == 0:
             response = self.client.predict_action(vla_input)
+            
+            # 检查响应状态
+            if response.get("status") == "error":
+                error_msg = response.get("error", {}).get("message", "Unknown error")
+                raise RuntimeError(f"Server error: {error_msg}")
+            
+            # 检查 data 字段是否存在
+            if "data" not in response:
+                raise KeyError(f"Response missing 'data' field. Response: {response}")
+            
             try:
                 normalized_actions = response["data"]["normalized_actions"] # B, chunk, D        
-            except KeyError:
+                # 获取服务器返回的时间信息
+                if "forward_time" in response["data"]:
+                    forward_time = response["data"]["forward_time"]
+            except KeyError as e:
                 print(f"Response data: {response}")
-                raise KeyError(f"Key 'normalized_actions' not found in response data: {response['data'].keys()}")
+                raise KeyError(f"Key 'normalized_actions' not found in response data: {response['data'].keys()}") from e
             
             normalized_actions = normalized_actions[0]    
             self.raw_actions = self.unnormalize_actions(normalized_actions=normalized_actions, action_norm_stats=self.action_norm_stats)
@@ -130,7 +144,7 @@ class ModelClient:
             "open_gripper": np.array(raw_actions[0, 6:7]),  # range [0, 1]; 1 = open; 0 = close
         }
 
-        return {"raw_action": raw_action}
+        return {"raw_action": raw_action, "forward_time": forward_time}
 
     @staticmethod
     def unnormalize_actions(normalized_actions: np.ndarray, action_norm_stats: Dict[str, np.ndarray]) -> np.ndarray:

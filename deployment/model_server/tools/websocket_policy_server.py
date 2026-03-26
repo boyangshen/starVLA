@@ -111,11 +111,20 @@ class WebsocketPolicyServer:
                     "ok": False,
                     "type": "inference_result",
                     "request_id": req_id,
-                    "error": {"message": "Payload must be a dict", "payload_type": str(type(payload))}
+                    "error": {"message": "Payload must be a dict", "payload_type": str(type(msg))}
                 }
             try:
-
+                # 计算模型推理时间
+                start_time = time.time()
+                
+                # 执行实际推理
                 ouput_dict = self._policy.predict_action(**msg)
+                
+                end_time = time.time()
+                forward_time = end_time - start_time
+                
+                # 将时间信息添加到输出字典中
+                ouput_dict["forward_time"] = forward_time
             except Exception as e:
                 logging.exception("Policy inference error (request_id=%s)", req_id)
                 logging.exception(e)

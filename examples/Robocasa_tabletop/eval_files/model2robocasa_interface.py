@@ -143,6 +143,17 @@ class PolicyWarper:
         
         response = self.client.predict_action(vla_input)
         
+        # 检查响应状态
+        if response.get("status") == "error":
+            error_msg = response.get("error", {}).get("message", "Unknown error")
+            raise RuntimeError(f"Server error: {error_msg}")
+        
+        # 检查 data 字段是否存在
+        if "data" not in response:
+            raise KeyError(f"Response missing 'data' field. Response: {response}")
+        
+        # 获取服务器返回的时间信息
+        forward_time = response["data"].get("forward_time", 0.0)
         
         # unnormalize the action
         normalized_actions = response["data"]["normalized_actions"] # B, chunk, D        
@@ -168,7 +179,7 @@ class PolicyWarper:
             "action.waist": raw_actions[:, :self.n_action_steps, 26:29],      # (B, n_action_steps, 3)
         }
 
-        return {"actions": raw_action}
+        return {"actions": raw_action, "forward_time": forward_time}
 
     @staticmethod
     def unnormalize_actions(normalized_actions: np.ndarray, action_norm_stats: Dict[str, np.ndarray]) -> np.ndarray:

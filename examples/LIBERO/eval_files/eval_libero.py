@@ -172,12 +172,10 @@ def eval_libero(args: Args) -> None:
                 }
 
                 
-                start_time = time.time()
-                
                 response = client_model.step(example=example_dict, step=step) 
                 
-                end_time = time.time()
-                forward_time = end_time - start_time
+                # 使用服务器返回的时间信息
+                forward_time = response.get("forward_time", 0.0)
                 forward_times.append(forward_time)
                 
                 if len(forward_times) % 10 == 0:
