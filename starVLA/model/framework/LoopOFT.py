@@ -179,7 +179,7 @@ class LoopOFT(baseframework):
         tmp_hidden_states = student_hidden_states[:,5::self.qwen_vl_interface.num_preserved_layers]
         assert tmp_hidden_states.shape[1] == self.qwen_vl_interface.num_loop
 
-        print(f"{remaining_scores=}")
+        # print(f"{remaining_scores=}")
 
         # Update loss update counter
         self._forward_step_count += 1
@@ -348,7 +348,7 @@ class LoopOFT(baseframework):
             
             # 处理 loop 相关的 hidden states
             student_hidden_states = torch.stack(qwenvl_outputs.hidden_states, dim=1)
-            logger.info(f"student_hidden_states shape: {student_hidden_states.shape}")
+            # logger.info(f"student_hidden_states shape: {student_hidden_states.shape}")
             
             # 获取 remaining_scores
             remaining_scores = torch.stack(qwenvl_outputs.remaining_scores, dim=1).squeeze(-1)
@@ -360,11 +360,19 @@ class LoopOFT(baseframework):
             # 推理时根据 remaining_scores 选择概率最大的位置对应的 hidden state
             tmp_hidden_states = student_hidden_states[:,5::self.qwen_vl_interface.num_preserved_layers]
             
-            # 找到每个样本中 remaining_scores 最大的索引
-            max_indices = torch.argmax(remaining_scores, dim=1)  # [B]
+            # 硬编码固定索引：如果需要使用固定索引，修改下面的值
+            fixed_loop_index = None  # 默认使用原始逻辑（None），如需固定索引改为具体整数
             
-            # 根据最大索引选择对应的 hidden state
-            student_last_hidden = torch.stack([tmp_hidden_states[i, max_indices[i], :, :] for i in range(tmp_hidden_states.shape[0])], dim=0)  # [B, S, H]
+            # 根据 fixed_loop_index 决定使用固定索引还是最大概率索引
+            if fixed_loop_index is not None:
+                # 使用固定索引
+                student_last_hidden = tmp_hidden_states[:, fixed_loop_index, :, :]  # [B, S, H]
+            else:
+                # 保持原始逻辑：找到每个样本中 remaining_scores 最大的索引
+                max_indices = torch.argmax(remaining_scores, dim=1)  # [B]
+                
+                # 根据最大索引选择对应的 hidden state
+                student_last_hidden = torch.stack([tmp_hidden_states[i, max_indices[i], :, :] for i in range(tmp_hidden_states.shape[0])], dim=0)  # [B, S, H]
 
         with torch.autocast("cuda", dtype=torch.float32):
             input_ids = qwen_inputs.get("input_ids", None)
