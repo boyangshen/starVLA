@@ -30,6 +30,8 @@ import os
 import robocasa  # noqa: F401
 import robosuite  # noqa: F401
 from robocasa.utils.gym_utils import GrootRoboCasaEnv  # noqa: F401
+# Import gymnasium_groot to register gr1_unified environments
+import robocasa.utils.gym_utils.gymnasium_groot  # noqa: F401
 from examples.Robocasa_tabletop.eval_files.base_config import ModalityConfig
 from examples.Robocasa_tabletop.eval_files.base_config import BasePolicy
 from examples.Robocasa_tabletop.eval_files.wrappers.multistep_wrapper import MultiStepWrapper
