@@ -76,7 +76,7 @@ echo "========================================"
 # ---------- 任务套件配置 ----------
 # LIBERO-plus 各 suite 的任务总数（来自 run_nebula_libero_plus.sh）
 TASK_SUITES=("libero_spatial" "libero_object" "libero_goal" "libero_10")
-TASK_SIZES=(2402 2518 2591 2519)
+TASK_SIZES=(2402 2518 2591 600)  # libero_10 已均匀采样为 600 个任务
 NUM_SUITES=${#TASK_SUITES[@]}
 
 mkdir -p "${OUTPUT_DIR}"

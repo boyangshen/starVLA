@@ -234,7 +234,7 @@ class PolicyModel:
         
         action_chunk_size = self.action_chunk_size
         if step % action_chunk_size == 0:
-            response = self.vla.predict_action(example, **vla_input)
+            response = self.vla.predict_action([example], **vla_input)
             normalized_actions = response["normalized_actions"] # B, chunk, D        
             
             normalized_actions = normalized_actions[0]  
