@@ -7,7 +7,7 @@ export NCCL_TIMEOUT=10000
 export NCCL_SOCKET_TIMEOUT_MS=360000
 
 # Debug CUDA device order
-export CUDA_VISIBLE_DEVICES=0,1,2
+export CUDA_VISIBLE_DEVICES=0,1,2,3
 export NCCL_DEBUG=INFO
 ###########################################################################################
 Framework_name=QwenOFT
@@ -29,7 +29,7 @@ log_file=${output_dir}/logs/train_${run_id}_$(date +%Y%m%d_%H%M%S).log
 
 accelerate launch \
   --config_file starVLA/config/deepseeds/deepspeed_zero2.yaml \
-  --num_processes 3 \
+  --num_processes 4 \
   starVLA/training/train_starvla.py \
   --config_yaml ${config_yaml} \
   --framework.name ${Framework_name} \
@@ -40,8 +40,8 @@ accelerate launch \
   --trainer.vla_data.video_backend torchvision_av \
   --trainer.gradient_accumulation_steps 1 \
   --trainer.freeze_modules ${freeze_module_list} \
-  --trainer.max_train_steps 100000 \
-  --trainer.is_resume false \
+  --trainer.max_train_steps 150000 \
+  --trainer.is_resume true \
   --trainer.save_interval 10000 \
   --trainer.logging_frequency 100 \
   --trainer.eval_interval 100 \
