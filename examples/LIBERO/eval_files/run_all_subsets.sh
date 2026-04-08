@@ -14,7 +14,7 @@ export PYTHONPATH=$(pwd):${PYTHONPATH}
 export MUJOCO_GL=osmesa
 
 # TODO: 修改为你的 checkpoint 路径
-your_ckpt=/memory/shenboyang/outputs/train/starvla/libero_loopoft_6x4_s2/checkpoints/steps_20000_pytorch_model.pt
+your_ckpt=/memory/shenboyang/outputs/train/starvla/libero_loopoft_3x8_s1/checkpoints/steps_70000_pytorch_model.pt
 
 # 4 个子集
 task_suites=("libero_10" "libero_goal" "libero_spatial" "libero_object")
@@ -26,7 +26,7 @@ server_port=5696
 num_trials_per_task=30
 
 # GPU 设置
-gpu_id=2
+gpu_id=1
 
 # 从 checkpoint 路径提取目录
 model_root=$(echo "$your_ckpt" | awk -F'/checkpoints/' '{print $1}')

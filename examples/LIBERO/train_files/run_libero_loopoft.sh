@@ -10,7 +10,7 @@ export NCCL_P2P_DISABLE=1
 export NCCL_IB_DISABLE=1
 
 # Debug CUDA device order
-export CUDA_VISIBLE_DEVICES=1,2,3
+export CUDA_VISIBLE_DEVICES=2,3
 # export NCCL_DEBUG=INFO
 # ###########################################################################################
 Framework_name=LoopOFT
@@ -18,9 +18,9 @@ freeze_module_list=""
 
 config_yaml=./examples/LIBERO/train_files/starvla_train_libero_loopoft.yaml
 libero_data_root=/memory/shenboyang/myCache/starvla/libero_dataset
-data_mix=libero_spatial
+data_mix=libero
 run_root_dir=/memory/shenboyang/outputs/train/starvla
-run_id=libero_spatial_loopoft_6x4_no_entropy
+run_id=libero_loopoft_8x3_s1
 ###########################################################################################
 
 output_dir=${run_root_dir}/${run_id}
@@ -33,32 +33,31 @@ log_file=${output_dir}/logs/train_${run_id}_$(date +%Y%m%d_%H%M%S).log
 
 accelerate launch \
   --config_file starVLA/config/deepseeds/deepspeed_zero2.yaml \
-  --num_processes 3 \
+  --num_processes 2 \
   --main_process_port 26790 \
   starVLA/training/train_starvla.py \
   --config_yaml ${config_yaml} \
   --framework.name ${Framework_name} \
-  --framework.qwenvl.num_preserved_layers 4 \
-  --framework.qwenvl.num_loop 6 \
-  --framework.use_entropy_loss false \
+  --framework.qwenvl.num_preserved_layers 3 \
+  --framework.qwenvl.num_loop 8 \
+  --framework.use_entropy_loss true \
   --framework.halting_entropy_weight 0.0001 \
   --framework.use_loop_effectiveness_loss false \
   --framework.loop_effectiveness_weight 1.0 \
-  --framework.use_cosine_loss false \
+  --framework.use_cosine_loss true \
   --framework.cosine_loss_weight 0.001 \
-  --framework.max_loss_updates 500 \
+  --framework.max_loss_updates 1000 \
   --framework.reduce_in_full_precision true \
   --datasets.vla_data.data_root_dir ${libero_data_root}\
   --datasets.vla_data.data_mix ${data_mix} \
   --datasets.vla_data.per_device_batch_size 16 \
   --trainer.vla_data.video_backend torchvision_av \
-  --trainer.gradient_accumulation_steps 1\
-  --trainer.max_train_steps 50000 \
   --trainer.freeze_modules ${freeze_module_list} \
-  --trainer.is_resume true \
-  --trainer.pretrained_checkpoint /memory/shenboyang/outputs/train/starvla/libero_spatial_loopoft_6x4_no_entropy/checkpoints/steps_20000_pytorch_model.pt \
+  --trainer.gradient_accumulation_steps 2\
+  --trainer.max_train_steps 70000 \
+  --trainer.is_resume false \
   --trainer.save_interval 10000 \
-  --trainer.logging_frequency 30 \
+  --trainer.logging_frequency 50 \
   --trainer.eval_interval 100 \
   --run_root_dir ${run_root_dir} \
   --run_id ${run_id} \

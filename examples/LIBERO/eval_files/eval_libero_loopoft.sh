@@ -14,13 +14,13 @@ export PYTHONPATH=$(pwd):${PYTHONPATH}
 export MUJOCO_GL=osmesa
 
 host="127.0.0.1"
-base_port=5694
+base_port=5696
 
 # TODO: 修改为你的 checkpoint 路径
-your_ckpt=/memory/shenboyang/outputs/train/starvla/libero_spatial_qwen3_2b_oft/checkpoints/steps_50000_pytorch_model.pt
+your_ckpt=/memory/shenboyang/outputs/train/starvla/libero_loopoft_6x4_s1/checkpoints/steps_100000_pytorch_model.pt
 
-task_suite_name=libero_spatial
-num_trials_per_task=10
+task_suite_name=libero_goal
+num_trials_per_task=30
 
 # 从 checkpoint 路径提取目录
 model_root=$(echo "$your_ckpt" | awk -F'/checkpoints/' '{print $1}')
