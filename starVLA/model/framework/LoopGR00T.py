@@ -218,6 +218,18 @@ class LoopGR00T(baseframework):
                 # Compute action loss using flow matching
                 state_repeated = state_tensor.repeat(1, 1, 1) if state_tensor is not None else None
                 layer_loss = self.action_model(action_queries, actions_target, state_repeated)
+                
+                # Ensure layer_loss has batch dimension [B]
+                if layer_loss.dim() == 0:
+                    # If loss is scalar, expand to [B]
+                    layer_loss = layer_loss.expand(action_queries.shape[0])
+                elif layer_loss.dim() == 1:
+                    # If loss is already [B], keep as is
+                    pass
+                else:
+                    # If loss has more dimensions, take mean over action dimensions
+                    layer_loss = layer_loss.mean(dim=[1, 2])  # [B]
+                
                 action_losses.append(layer_loss)
             
             # Stack losses and compute mean
@@ -356,11 +368,22 @@ class LoopGR00T(baseframework):
             # Get loop hidden states
             tmp_hidden_states = student_hidden_states[:, 5::self.qwen_vl_interface.num_preserved_layers]
             
-            # Use fixed loop index for inference
-            fixed_loop_index = 2  # Default to the last loop iteration
+            # Fixed loop index: if None, select the iteration with highest probability
+            fixed_loop_index = None  # Default to highest probability, set to int for fixed index
             
-            # Select hidden state based on fixed index
-            student_last_hidden = tmp_hidden_states[:, fixed_loop_index, :, :]  # [B, S, H]
+            # Select hidden state based on fixed index or highest probability
+            if fixed_loop_index is not None:
+                # Use fixed index
+                student_last_hidden = tmp_hidden_states[:, fixed_loop_index, :, :]  # [B, S, H]
+            else:
+                # Find the index with highest remaining_scores for each sample
+                max_indices = torch.argmax(remaining_scores, dim=1)  # [B]
+                
+                # Select corresponding hidden state for each sample
+                student_last_hidden = torch.stack(
+                    [tmp_hidden_states[i, max_indices[i], :, :] for i in range(tmp_hidden_states.shape[0])],
+                    dim=0
+                )  # [B, S, H]
 
         # Process state if present
         state_tensor = None
