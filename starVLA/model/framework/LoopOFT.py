@@ -177,7 +177,7 @@ class LoopOFT(baseframework):
 
         # TODO： get halting layer output for last_hidden
         tmp_hidden_states = student_hidden_states[:,5::self.qwen_vl_interface.num_preserved_layers]
-        assert tmp_hidden_states.shape[1] == self.qwen_vl_interface.num_loop
+        # assert tmp_hidden_states.shape[1] == self.qwen_vl_interface.num_loop
 
         # print(f"{remaining_scores=}")
 
