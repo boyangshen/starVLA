@@ -827,32 +827,11 @@ class HaltingModule(nn.Module):
         self.num_loop = config.num_loop
         self.hidden_size = config.hidden_size
         self.stop_threshold = getattr(config, 'stop_threshold', 0.15)
-        self.num_heads = getattr(config, 'halting_num_heads', 8)
-        self.halting_query_num = getattr(config, 'halting_query_num', 3)
 
-        self.max_position_embeddings = config.num_loop + 2
-        inv_freq = 1.0 / (10000 ** (torch.arange(0, config.hidden_size, 2).float() / config.hidden_size))
-        self.register_buffer("inv_freq", inv_freq, persistent=False)
-
-        self.halting_cross_attn_layers = getattr(config, 'halting_cross_attn_layers', 2)
-        self.cross_attn_layers = nn.ModuleList([
-            HaltingCrossAttentionLayer(config.hidden_size, self.num_heads)
-            for _ in range(self.halting_cross_attn_layers)
-        ])
-
-        self.latent_proj = nn.Linear(config.hidden_size * self.halting_query_num, config.hidden_size)
+        # 直接使用 action token 的 hidden state 接 MLP
+        self.latent_proj = nn.Linear(config.hidden_size, config.hidden_size)
         self.latent_norm = nn.LayerNorm(config.hidden_size)
         self.halting_head = nn.Linear(config.hidden_size, 1)
-
-    def _get_loop_position_encoding(self, position: int, batch_size: int, device: torch.device) -> torch.Tensor:
-        position = torch.tensor([position], device=device)
-        inv_freq = self.inv_freq.to(device)
-
-        positions = position.unsqueeze(-1)
-        angles = positions * inv_freq
-
-        pe = torch.cat([torch.sin(angles), torch.cos(angles)], dim=-1)
-        return pe.repeat(batch_size, 1)
 
     def forward(
         self,
@@ -864,26 +843,17 @@ class HaltingModule(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         batch_size = hidden_states.shape[0]
 
-        loop_emb = self._get_loop_position_encoding(loop_idx + 1, batch_size, hidden_states.device)
+        # 直接使用 action token 位置的 hidden state
+        if action_token_mask is not None:
+            # 提取 action token 的 hidden state
+            action_tokens = hidden_states[action_token_mask].view(batch_size, -1, self.hidden_size)
+            # 对 action token 进行平均池化
+            latent = action_tokens.mean(dim=1)  # [B, hidden_size]
+        else:
+            # 如果没有 action token，使用整个序列的平均
+            latent = hidden_states.mean(dim=1)  # [B, hidden_size]
 
-        query = hidden_states[:, -3:, :]
-        query = query + loop_emb.unsqueeze(1)
-
-        key_value = hidden_states[action_token_mask].view(batch_size, -1, self.hidden_size)
-        
-        # if action_token_mask is not None and visual_pos_masks is not None:
-        #     visual_tokens = hidden_states[visual_pos_masks].view(batch_size, -1, self.hidden_size)
-        #     action_tokens = hidden_states[action_token_mask].view(batch_size, -1, self.hidden_size)
-        #     key_value = torch.cat([visual_tokens, action_tokens], dim=1)
-        # elif action_token_mask is not None:
-        #     key_value = hidden_states[action_token_mask].view(batch_size, -1, self.hidden_size)
-        # else:
-        #     key_value = hidden_states
-
-        for cross_attn_layer in self.cross_attn_layers:
-            query = cross_attn_layer(query, key_value)
-
-        latent = query.reshape(batch_size, -1)
+        # 通过 MLP 计算得到概率
         latent = self.latent_proj(latent)
         latent = self.latent_norm(latent)
 
