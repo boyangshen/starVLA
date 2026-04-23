@@ -314,19 +314,9 @@ class LoopOFT(baseframework):
 
         qwen_inputs = self.qwen_vl_interface.build_qwenvl_inputs(images=batch_images, instructions=instructions)
         
-        # 添加 3 个 loop token
         input_ids = qwen_inputs.get("input_ids")
         if input_ids is not None:
-            loop_tokens = torch.tensor([self.loop_token_ids], dtype=input_ids.dtype, device=input_ids.device).expand(input_ids.shape[0], -1)
-            qwen_inputs["input_ids"] = torch.cat([input_ids, loop_tokens], dim=1)
-            if "attention_mask" in qwen_inputs:
-                attention_mask = qwen_inputs["attention_mask"]
-                ones = torch.ones((attention_mask.shape[0], 3), dtype=attention_mask.dtype, device=attention_mask.device)
-                qwen_inputs["attention_mask"] = torch.cat([attention_mask, ones], dim=1)
-
-            action_token_mask = torch.zeros_like(qwen_inputs["input_ids"], dtype=torch.bool)
-            if self.action_token_id is not None:
-                action_token_mask = (qwen_inputs["input_ids"] == self.action_token_id)
+            action_token_mask = (input_ids == self.action_token_id)
             qwen_inputs["action_token_mask"] = action_token_mask
         
         with torch.autocast("cuda", dtype=torch.bfloat16):
