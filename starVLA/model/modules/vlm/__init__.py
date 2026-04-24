@@ -10,6 +10,10 @@ def get_vlm_model(config):
         from .QWen3 import _QWen3_VL_Interface
 
         return _QWen3_VL_Interface(config)
+    elif "loopvlm" in vlm_name.lower():
+        from .LoopVLM import _LoopVLM_Interface
+
+        return _LoopVLM_Interface(config)
     elif "Qwen3.5" in vlm_name:
         from .QWen3_5 import _QWen3_5_VL_Interface
 
