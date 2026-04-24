@@ -20,7 +20,7 @@ config_yaml=./examples/LIBERO/train_files/starvla_train_libero_loopoft.yaml
 libero_data_root=/memory/shenboyang/myCache/starvla/libero_dataset
 data_mix=libero
 run_root_dir=/memory/shenboyang/outputs/train/starvla
-run_id=libero_loopoft_8x3_s1
+run_id=libero_loopoft_8x3_s1_na
 ###########################################################################################
 
 output_dir=${run_root_dir}/${run_id}
@@ -50,11 +50,11 @@ accelerate launch \
   --framework.reduce_in_full_precision true \
   --datasets.vla_data.data_root_dir ${libero_data_root}\
   --datasets.vla_data.data_mix ${data_mix} \
-  --datasets.vla_data.per_device_batch_size 16 \
+  --datasets.vla_data.per_device_batch_size 24 \
   --trainer.vla_data.video_backend torchvision_av \
   --trainer.freeze_modules ${freeze_module_list} \
   --trainer.gradient_accumulation_steps 2\
-  --trainer.max_train_steps 70000 \
+  --trainer.max_train_steps 90000 \
   --trainer.is_resume false \
   --trainer.save_interval 10000 \
   --trainer.logging_frequency 50 \
