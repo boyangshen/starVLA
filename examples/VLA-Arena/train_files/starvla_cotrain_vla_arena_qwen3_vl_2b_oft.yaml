@@ -3,7 +3,7 @@ run_root_dir: results/Checkpoints
 seed: 42
 trackers: [jsonl, wandb]
 wandb_entity: your_wandb_entity
-wandb_project: Qwen3VL_2B_OFT_VLA_Arena
+wandb_project: loop_vla
 is_debug: false
 
 
@@ -14,7 +14,7 @@ framework:
   name: QwenOFT
   qwenvl:
     base_vlm: ./playground/Pretrained_models/Qwen3-VL-2B-Instruct
-    attn_implementation: flash_attention_2
+    attn_implementation: eager
     vl_hidden_dim: 2048
   action_model:
     action_model_type: MLP

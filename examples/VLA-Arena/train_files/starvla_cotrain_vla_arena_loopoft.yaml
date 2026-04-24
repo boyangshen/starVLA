@@ -3,7 +3,7 @@ run_root_dir: results/Checkpoints
 seed: 42
 trackers: [jsonl, wandb]
 wandb_entity: your_wandb_entity
-wandb_project: LoopOFT_VLA_Arena
+wandb_project: loop_vla
 is_debug: false
 
 
@@ -24,7 +24,7 @@ framework:
   max_loss_updates: 10000
   qwenvl:
     base_vlm: ./playground/Pretrained_models/Qwen3-VL-4B-Instruct
-    attn_implementation: flash_attention_2
+    attn_implementation: eager
     vl_hidden_dim: 2048
     vlm_path: null
     pretrained_weights_path: null

@@ -26,8 +26,9 @@ export NCCL_SOCKET_TIMEOUT_MS=360000
 # ---------------------------------------------------------------------------
 Framework_name=LoopOFT
 freeze_module_list=''
+CUDA_VISIBLE_DEVICES=0,1
 
-base_vlm=playground/Pretrained_models/Qwen3-VL-4B-Instruct
+base_vlm=/memory/shenboyang/myCache/huggingface/hub/Qwen--Qwen3-VL-4B-Instruct
 config_yaml=./examples/VLA-Arena/train_files/starvla_cotrain_vla_arena_loopoft.yaml
 
 # VLA-Arena LeRobot dataset root (contains suite sub-directories)
@@ -37,15 +38,15 @@ vla_arena_data_root=playground/Datasets/VLA_ARENA_LEROBOT_DATA
 #   vla_arena_L0_S        – small split
 #   vla_arena_L0_M        – medium split
 #   vla_arena_L0_L        – large split
-data_mix=vla_arena_L0_L
+data_mix=vla_arena_L0_S
 
 # LoopVLM specific parameters
 num_preserved_layers=3
-num_loop=12
+num_loop=8
 loop_token_id=140000
 
-run_root_dir=./results/Checkpoints
-run_id=loopoft_vla_arena_all
+run_root_dir=/memory/shenboyang/outputs/train/starvla
+run_id=loopoft_vla_arena_small
 # ---------------------------------------------------------------------------
 
 output_dir=${run_root_dir}/${run_id}
@@ -78,8 +79,6 @@ accelerate launch \
   --trainer.eval_interval 5000 \
   --run_root_dir ${run_root_dir} \
   --run_id ${run_id} \
-  --wandb_project LoopOFT_VLA_Arena \
-  --wandb_entity your_wandb_entity
   # --is_debug True
 
 
