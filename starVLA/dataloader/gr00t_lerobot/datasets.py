@@ -94,7 +94,6 @@ def calculate_dataset_statistics(parquet_paths: list[Path]) -> dict:
         if "task_info" in le_modality:
             continue
         print(f"Computing statistics for {le_modality}...")
-        # 检查数据是否为空或无效
         try:
             np_data = np.vstack(
                 [np.asarray(x, dtype=np.float32) for x in all_low_dim_data[le_modality]]
@@ -115,7 +114,8 @@ def calculate_dataset_statistics(parquet_paths: list[Path]) -> dict:
 
 
 def _normalize_action_mode(mode: str) -> str:
-    """Normalize action mode names to {abs, delta, rel}."""
+    """Normalize action mode names to {abs, delta, rel}.""" 
+    # @gaoning plz move this, we want dataloader to be independent of the action mode logic, we can move this to transform or a separate utils tool to handle lerobot dataset
     mode = str(mode).lower()
     if mode in {"absolute", "raw"}:
         mode = "abs"
@@ -926,16 +926,36 @@ class LeRobotSingleDataset(Dataset):
                         video_key = str(col)[len("videos/") : -len("/from_timestamp")]
                         from_timestamps[video_key] = float(value)
 
-                    # TODO auto map key? just map to file_path and file_from_index
+                    # TODO auto map key 
+                    # Collect video file indices for each video key
+                    #已修改的lerobotv3.0的视频索引（提取视频和文件的索引）
+                    video_file_indices = {}
+                    for col in timestamp_cols:
+                        video_key = str(col)[len("videos/") : -len("/from_timestamp")]
+                        chunk_col = f"videos/{video_key}/chunk_index"
+                        file_col = f"videos/{video_key}/file_index"
+                        if chunk_col in episode and file_col in episode:
+                            video_file_indices[video_key] = {
+                                "chunk_index": int(episode[chunk_col]),
+                                "file_index": int(episode[file_col]),
+                            }
+                    print(video_file_indices)
                     episode_meta = {
                         "data/chunk_index": episode["data/chunk_index"],
                         "data/file_index": episode["data/file_index"],
                         "data/file_from_index": index,
                         "videos/from_timestamps": from_timestamps,
+                        "videos/file_indices": video_file_indices,
                     }
+                    # episode_meta = {
+                    #     "data/chunk_index": episode["data/chunk_index"],
+                    #     "data/file_index": episode["data/file_index"],
+                    #     "data/file_from_index": index,
+                    #     "videos/from_timestamps": from_timestamps,
+                    # }
                     self.trajectory_ids_to_metadata[trajectory_ids[-1]] = episode_meta
 
-            # 这里应该可以直接读取到 save index 信息
+            # Should be able to directly read the saved index info here
             return np.array(trajectory_ids), np.array(trajectory_lengths)
 
     def _get_all_steps(self) -> list[tuple[int, int]]:
@@ -1284,9 +1304,9 @@ class LeRobotSingleDataset(Dataset):
         elif self._lerobot_version == "v3.0":
             tasks_path = self.dataset_path / LE_ROBOT3_TASKS_FILENAME
             df = pd.read_parquet(tasks_path)
-            df = df.reset_index()  # 把索引变成一列，列名通常为 'index'
-            df = df.rename(columns={'index': 'task'})  # 把 'index' 列重命名为 'task'
-            df = df[['task_index', 'task']]  # 调整列顺序
+            df = df.reset_index()  # convert index to a column, typically named 'index'
+            df = df.rename(columns={'index': 'task'})  # rename 'index' column to 'task'
+            df = df[['task_index', 'task']]  # reorder columns
             return df
     def _check_integrity(self):
         """Use the config to check if the keys are valid and detect silent data corruption."""
@@ -1542,6 +1562,16 @@ class LeRobotSingleDataset(Dataset):
             )
         elif self._lerobot_version == "v3.0":
             episode_meta = self.trajectory_ids_to_metadata[trajectory_id]
+
+            video_file_indices = episode_meta.get("videos/file_indices", {})
+            # print(f"{video_file_indices=}")
+            #已修改的lerobotv3.0的视频索引
+            if original_key in video_file_indices:
+                video_chunk_index = video_file_indices[original_key]["chunk_index"]
+                video_file_index = video_file_indices[original_key]["file_index"]
+            else:
+                video_chunk_index = episode_meta["data/chunk_index"]
+                video_file_index = episode_meta["data/file_index"]
             video_filename = self.video_path_pattern.format(
                 video_key=original_key,
                 chunk_index=episode_meta["data/chunk_index"],
@@ -2099,7 +2129,7 @@ class LeRobotMixtureDataset(Dataset):
         # 1. Dataset lengths
         self._dataset_lengths = np.array([len(dataset) for dataset in self.datasets])
         print(f"Dataset lengths: {self._dataset_lengths}")
-
+        self._getitem_count = 0
         # 2. Dataset sampling weights
         self._dataset_sampling_weights = np.array(dataset_sampling_weights)
         
@@ -2232,14 +2262,14 @@ class LeRobotMixtureDataset(Dataset):
         dataset = self.datasets[dataset_index]
 
         # Sample trajectory
-        # trajectory_index = rng.choice(
-        #     len(dataset.trajectory_ids), p=self.trajectory_sampling_weights[dataset_index]
-        # )
-        # trajectory_id = dataset.trajectory_ids[trajectory_index]
+        trajectory_index = rng.choice(
+            len(dataset.trajectory_ids), p=self.trajectory_sampling_weights[dataset_index]
+        )
+        trajectory_id = dataset.trajectory_ids[trajectory_index]
 
-        # # Sample step
-        # base_index = rng.choice(dataset.trajectory_lengths[trajectory_index])
-        # return dataset, trajectory_id, base_index
+        # Sample step
+        base_index = rng.choice(dataset.trajectory_lengths[trajectory_index])
+        return dataset, trajectory_id, base_index
         if len(dataset.all_steps) == 0:
             raise ValueError(f"Dataset {dataset.dataset_name} has no steps.")
 
@@ -2261,7 +2291,7 @@ class LeRobotMixtureDataset(Dataset):
         trajectory_id, base_index = dataset.all_steps[single_step_index]
         return dataset, trajectory_id, base_index
 
-    _getitem_count = 0
+    
 
     def __getitem__(self, index: int) -> dict:
         """Get the data for a single trajectory and start index.
@@ -2272,8 +2302,8 @@ class LeRobotMixtureDataset(Dataset):
         Returns:
             dict: The data for the trajectory and start index.
         """
-        LeRobotMixtureDataset._getitem_count += 1
-        if LeRobotMixtureDataset._getitem_count % 1000 == 0:
+        self._getitem_count += 1
+        if self._getitem_count % 1000 == 0:
             gc.collect()
 
         max_retries = 10
