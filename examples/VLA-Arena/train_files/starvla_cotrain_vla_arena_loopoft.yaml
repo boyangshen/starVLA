@@ -1,56 +1,62 @@
-run_id: loopoft_vla_arena
+run_id: starvla_loopoft
 run_root_dir: results/Checkpoints
 seed: 42
 trackers: [jsonl, wandb]
 wandb_entity: your_wandb_entity
-wandb_project: loop_vla
+wandb_project: loopoft
 is_debug: false
 
 
-# ---------------------------------------------------------------------------
-# Framework
-# ---------------------------------------------------------------------------
 framework:
   name: LoopOFT
-  use_teacher_llm: true
-  teacher_loss_weight: 0.5
-  teacher_loss_decay_steps: 1000
-  use_entropy_loss: true
-  halting_entropy_weight: 0.0
-  use_loop_effectiveness_loss: false
-  loop_effectiveness_weight: 1.0
-  use_cosine_loss: true
-  cosine_loss_weight: 0.2
-  max_loss_updates: 10000
+  is_training: true
+  use_teacher_llm: false
+  use_entropy_loss: false
+  halting_entropy_weight: 0.0001
   qwenvl:
-    base_vlm: ./playground/Pretrained_models/Qwen3-VL-4B-Instruct
+    base_vlm: loopvlm
     attn_implementation: eager
-    vl_hidden_dim: 2048
-    vlm_path: null
-    pretrained_weights_path: null
+    vlm_path: /memory/shenboyang/myCache/huggingface/hub/Qwen--Qwen3-VL-2B-Instruct/
+    pretrained_weights_path: /memory/shenboyang/myCache/huggingface/hub/Qwen--Qwen3-VL-2B-Instruct/model.safetensors
+    
+    # ===== Loop 相关参数 =====
     loop_token_id: 140000
     as_student: true
-    num_preserved_layers: 3
-    num_loop: 12
-    stop_threshold: 0.5
+    num_preserved_layers: 24
+    num_loop: 1
+    stop_threshold: 0.32
+    halting_query_num: 3
+    halting_cross_attn_layers: 2
+  
+  dino:
+    dino_backbone: dinov2_vits14
+  
   action_model:
-    action_model_type: MLP
-    action_hidden_dim: 2048
-    hidden_size: 2048
-    add_pos_embed: true
-    max_seq_len: 1024
+    action_model_type: OFT
     action_dim: 7
-    state_dim: 7
+    state_dim: 8
     future_action_window_size: 7
     action_horizon: 8
     past_action_window_size: 0
 
+  teacher_loss_weight: 0.1
+  teacher_loss_decay_steps: 1000
+  
+  # Loop effectiveness loss parameters
+  use_loop_effectiveness_loss: false
+  loop_effectiveness_weight: 1.0
+
+  
+  # Cosine similarity loss parameter
+  use_cosine_loss: true
+  cosine_loss_weight: 0.01
+  
+  # Loss update counter parameter
+  max_loss_updates: 500
+  
   reduce_in_full_precision: true
 
 
-# ---------------------------------------------------------------------------
-# Datasets
-# ---------------------------------------------------------------------------
 datasets:
   vlm_data:
     dataset_py: vlm_datasets
@@ -62,14 +68,14 @@ datasets:
     max_pixels: 307200
     min_pixels: 784
     model_max_length: 2048
-    model_type: qwen3vl
+    model_type: qwen2.5vl
     per_device_batch_size: 4
 
   vla_data:
     dataset_py: lerobot_datasets
     data_root_dir: playground/Datasets/VLA_ARENA_LEROBOT_DATA
-    data_mix: vla_arena_L0_L
-    action_type: delta_eef
+    data_mix: vla_arena_L0_L    # see starVLA/dataloader/gr00t_lerobot/mixtures.py
+    action_type: delta_eef        # 7-DOF delta EEF (pos + rotation + gripper)
     sequential_step_sampling: false
     CoT_prompt: "Your task is {instruction}. Identify the key objects and locate their bounding boxes in [x1,y1,x2,y2] format."
     CoT_answer: bbox
@@ -80,39 +86,45 @@ datasets:
     video_backend: torchvision_av
 
 
-# ---------------------------------------------------------------------------
-# Trainer
-# ---------------------------------------------------------------------------
 trainer:
   epochs: 100
   max_train_steps: 80000
   num_warmup_steps: 5000
   save_interval: 10000
-  eval_interval: 5000
-  logging_frequency: 100
+  eval_interval: 100
   learning_rate:
     base: 2.5e-05
     qwen_vl_interface: 1.0e-05
     action_model: 1.0e-04
+    # base: 2e-04
+
   lr_scheduler_type: cosine_with_min_lr
   scheduler_specific_kwargs:
     min_lr: 1.0e-06
-  freeze_modules: ''
+
+  freeze_modules: "action_model,\
+    qwen_vl_interface.model.visual,\
+    qwen_vl_interface.model.language_model.layers,\
+    qwen_vl_interface.model.language_model.embed_tokens,\
+    qwen_vl_interface.model.language_model.norm,\
+    qwen_vl_interface.model.language_model.rotary_emb"
+
   loss_scale:
     vla: 1.0
     vlm: 0.1
   max_grad_norm: 1.0
   warmup_ratio: 0.1
   weight_decay: 0.0
+  logging_frequency: 10
   gradient_clipping: 1.0
-  gradient_accumulation_steps: 4
-  gradient_checkpointing: true
+  gradient_accumulation_steps: 1
+
   optimizer:
     name: AdamW
     betas: [0.9, 0.95]
     eps: 1.0e-08
     weight_decay: 1.0e-08
-  is_resume: false
+
   resume_epoch: null
   resume_step: null
   enable_gradient_checkpointing: true
