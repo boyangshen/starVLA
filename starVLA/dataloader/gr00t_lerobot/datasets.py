@@ -780,12 +780,27 @@ class LeRobotSingleDataset(Dataset):
             width = le_video_meta["shape"][le_video_meta["names"].index("width")]
             # NOTE(FH): different lerobot dataset versions have different keys for the number of channels and fps
             try:
-                channels = le_video_meta["shape"][le_video_meta["names"].index("channel")]
-                fps = le_video_meta["video_info"]["video.fps"]
+                # Try to get channel from shape names
+                if "channel" in le_video_meta["names"]:
+                    channels = le_video_meta["shape"][le_video_meta["names"].index("channel")]
+                elif "channels" in le_video_meta["names"]:
+                    channels = le_video_meta["shape"][le_video_meta["names"].index("channels")]
+                else:
+                    # Fallback to default channel count
+                    channels = 3
+                
+                # Try to get fps from different possible locations
+                if "video_info" in le_video_meta and "video.fps" in le_video_meta["video_info"]:
+                    fps = le_video_meta["video_info"]["video.fps"]
+                elif "info" in le_video_meta and "video.fps" in le_video_meta["info"]:
+                    fps = le_video_meta["info"]["video.fps"]
+                else:
+                    # Fallback to fps from root info
+                    fps = le_info.get("fps", 10)
             except (ValueError, KeyError):
-                # channels = le_video_meta["shape"][le_video_meta["names"].index("channels")]
-                channels = le_video_meta["info"]["video.channels"]
-                fps = le_video_meta["info"]["video.fps"]
+                # Final fallback
+                channels = 3
+                fps = le_info.get("fps", 10)
             simplified_modality_meta["video"][new_key] = {
                 "resolution": [width, height],
                 "channels": channels,
@@ -1609,6 +1624,65 @@ class LeRobotSingleDataset(Dataset):
         # Get the sub-key
         key = key.replace("video.", "")
         video_path = self.get_video_path(trajectory_id, key)
+        
+        # If video file doesn't exist, read from parquet
+        if not video_path.exists():
+            assert self.curr_traj_data is not None, f"No data found for {trajectory_id=}"
+            original_key = self.lerobot_modality_meta.video[key].original_key
+            if original_key is None:
+                original_key = key
+            assert original_key in self.curr_traj_data.columns, f"No {original_key} found in {trajectory_id=}"
+            
+            # Get image data from parquet using the exact step indices
+            # This ensures perfect timestamp alignment
+            images = []
+            for idx in step_indices:
+                img_data = self.curr_traj_data.iloc[idx][original_key]
+                # Handle different image formats
+                if isinstance(img_data, dict):
+                    # If image is stored as dict, convert to numpy array
+                    # Common formats: {'data': np.ndarray, 'shape': ...} or {'rgb': ...} or {'bytes': ...}
+                    if 'data' in img_data and isinstance(img_data['data'], np.ndarray):
+                        img = img_data['data']
+                    elif 'rgb' in img_data and isinstance(img_data['rgb'], np.ndarray):
+                        img = img_data['rgb']
+                    elif 'bytes' in img_data and isinstance(img_data['bytes'], bytes):
+                        # Handle VLA-Arena format: {'bytes': b'...', 'path': '...'}
+                        img_bytes = img_data['bytes']
+                        if len(img_bytes) < 10:
+                            # Skip invalid data
+                            continue
+                        
+                        # Try OpenCV decoding first
+                        try:
+                            import cv2
+                            img = cv2.imdecode(np.frombuffer(img_bytes, np.uint8), cv2.IMREAD_COLOR)
+                            if img is not None:
+                                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                            else:
+                                # Try PIL as fallback
+                                from PIL import Image
+                                from io import BytesIO
+                                img = Image.open(BytesIO(img_bytes))
+                                img = np.array(img)
+                        except Exception as e:
+                            # Decoding failed, skip this image
+                            continue
+                    else:
+                        # Try to extract array from dict
+                        img = np.array(img_data)
+                elif isinstance(img_data, bytes):
+                    # If image is stored as bytes, decode it
+                    import cv2
+                    img = cv2.imdecode(np.frombuffer(img_data, np.uint8), cv2.IMREAD_COLOR)
+                    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                else:
+                    # Assume it's already a numpy array or can be converted
+                    img = np.array(img_data)
+                images.append(img)
+            
+            return np.stack(images)
+        
         # Get the action/state timestamps for each frame in the video
         assert self.curr_traj_data is not None, f"No data found for {trajectory_id=}"
         assert "timestamp" in self.curr_traj_data.columns, f"No timestamp found in {trajectory_id=}"
@@ -2311,15 +2385,20 @@ class LeRobotMixtureDataset(Dataset):
 
         for attempt in range(max_retries):
             try:
-                while True: # @DUG
-                    dataset, trajectory_id, step = self.sample_step(index)
-                    key = dataset.modality_keys["video"][0].replace("video.", "")
-                    video_path = dataset.get_video_path(trajectory_id, key)
-                    if os.path.exists(video_path):
-                        break
-                    index = random.randint(0, len(self) - 1)
-                    
-                raw_data = dataset.get_step_data(trajectory_id, step)    
+                # Original video check logic (commented out)
+                # while True: # @DUG
+                #     dataset, trajectory_id, step = self.sample_step(index)
+                #     key = dataset.modality_keys["video"][0].replace("video.", "")
+                #     video_path = dataset.get_video_path(trajectory_id, key)
+                #     if os.path.exists(video_path):
+                #         break
+                #     index = random.randint(0, len(self) - 1)
+                #     
+                # raw_data = dataset.get_step_data(trajectory_id, step)    
+                
+                # Simplified logic: let get_video handle both video files and parquet
+                dataset, trajectory_id, step = self.sample_step(index)
+                raw_data = dataset.get_step_data(trajectory_id, step)
                 data = dataset.transforms(raw_data)
                 sample = dataset._pack_sample(data)
                 sample["robot_tag"] = dataset.tag

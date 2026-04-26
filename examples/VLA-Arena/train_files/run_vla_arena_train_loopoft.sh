@@ -10,14 +10,14 @@ export NCCL_P2P_DISABLE=1
 export NCCL_IB_DISABLE=1
 
 # Debug CUDA device order
-export CUDA_VISIBLE_DEVICES=1,2
+export CUDA_VISIBLE_DEVICES=1,2,3
 # export NCCL_DEBUG=INFO
 # ###########################################################################################
 Framework_name=LoopOFT
 freeze_module_list=""
 
 config_yaml=./examples/VLA-Arena/train_files/starvla_cotrain_vla_arena_loopoft.yaml
-vla_arena_data_root=playground/Datasets/VLA_ARENA_LEROBOT_DATA
+vla_arena_data_root=/memory/shenboyang/myCache/starvla/vla-Arena/vla_arena/
 data_mix=vla_arena_L0_S
 run_root_dir=/memory/shenboyang/outputs/train/starvla
 run_id=vla_arena_loopoft_8x3_s1
@@ -33,28 +33,29 @@ log_file=${output_dir}/logs/train_${run_id}_$(date +%Y%m%d_%H%M%S).log
 
 accelerate launch \
   --config_file starVLA/config/deepseeds/deepspeed_zero2.yaml \
-  --num_processes 2 \
+  --num_processes 3 \
   --main_process_port 26791 \
   starVLA/training/train_starvla.py \
   --config_yaml ${config_yaml} \
   --framework.name ${Framework_name} \
-  --framework.qwenvl.num_preserved_layers 2 \
-  --framework.qwenvl.num_loop 12 \
+  --framework.qwenvl.num_preserved_layers 3 \
+  --framework.qwenvl.num_loop 8 \
   --framework.use_entropy_loss false \
   --framework.halting_entropy_weight 0.0001 \
   --framework.use_loop_effectiveness_loss true \
   --framework.loop_effectiveness_weight 1.0 \
   --framework.use_cosine_loss false \
   --framework.cosine_loss_weight 0.001 \
-  --framework.max_loss_updates 1000 \
+  --framework.max_loss_updates 600 \
   --framework.reduce_in_full_precision true \
   --datasets.vla_data.data_root_dir ${vla_arena_data_root}\
   --datasets.vla_data.data_mix ${data_mix} \
-  --datasets.vla_data.per_device_batch_size 32 \
+  --datasets.vla_data.per_device_batch_size 8 \
   --trainer.vla_data.video_backend torchvision_av \
   --trainer.gradient_accumulation_steps 1\
   --trainer.max_train_steps 30000 \
-  --trainer.is_resume false \
+  --trainer.freeze_modules ${freeze_module_list} \
+  --trainer.is_resume true \
   --trainer.save_interval 5000 \
   --trainer.logging_frequency 50 \
   --trainer.eval_interval 100 \

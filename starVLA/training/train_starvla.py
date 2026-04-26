@@ -360,7 +360,7 @@ class VLATrainer(TrainerUtils):
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 output_dict = self.model.forward(batch_vla)
                 action_loss = output_dict["action_loss"]
-                total_loss = action_loss
+                total_loss = output_dict["total_loss"]
 
             self.accelerator.backward(total_loss)
 
