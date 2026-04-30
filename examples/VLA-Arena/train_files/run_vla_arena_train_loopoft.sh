@@ -10,7 +10,7 @@ export NCCL_P2P_DISABLE=1
 export NCCL_IB_DISABLE=1
 
 # Debug CUDA device order
-export CUDA_VISIBLE_DEVICES=1,2,3
+export CUDA_VISIBLE_DEVICES=1,3
 # export NCCL_DEBUG=INFO
 # ###########################################################################################
 Framework_name=LoopOFT
@@ -33,7 +33,7 @@ log_file=${output_dir}/logs/train_${run_id}_$(date +%Y%m%d_%H%M%S).log
 
 accelerate launch \
   --config_file starVLA/config/deepseeds/deepspeed_zero2.yaml \
-  --num_processes 3 \
+  --num_processes 2 \
   --main_process_port 26791 \
   starVLA/training/train_starvla.py \
   --config_yaml ${config_yaml} \
@@ -53,10 +53,10 @@ accelerate launch \
   --datasets.vla_data.per_device_batch_size 8 \
   --trainer.vla_data.video_backend torchvision_av \
   --trainer.gradient_accumulation_steps 1\
-  --trainer.max_train_steps 30000 \
+  --trainer.max_train_steps 60000 \
   --trainer.freeze_modules ${freeze_module_list} \
   --trainer.is_resume true \
-  --trainer.save_interval 5000 \
+  --trainer.save_interval 6000 \
   --trainer.logging_frequency 50 \
   --trainer.eval_interval 100 \
   --run_root_dir ${run_root_dir} \

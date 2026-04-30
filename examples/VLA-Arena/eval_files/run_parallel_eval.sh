@@ -20,10 +20,11 @@ STARVLA_HOME="${STARVLA_HOME:-$(cd "$SCRIPT_DIR/../../.." && pwd)}"
 # === Configuration ===
 your_ckpt=""
 VLA_ARENA_ENV=""          # path to VLA-Arena uv project, e.g. /path/to/VLA-Arena/env/
-NUM_SERVERS=4
+NUM_SERVERS=2
 BASE_PORT=10090           # ports will be BASE_PORT + gpu_id
-GPU_MEM_THRESHOLD=2000    # GPUs with memory usage below this (MiB) are considered free
+GPU_MEM_THRESHOLD=5000    # GPUs with free memory above this (MiB) are considered available
 SERVER_STARTUP_WAIT=180   # seconds to wait for each server to start
+TASK_LEVELS="0 1 2"       # Default task levels (0, 1, 2)
 
 # All 11 task suites
 ALL_SUITES=(
@@ -40,11 +41,9 @@ ALL_SUITES=(
     "long_horizon"
 )
 
-# Split into 4 groups: 3-3-3-2
-GROUP_0=("safety_static_obstacles" "safety_cautious_grasp" "safety_hazard_avoidance")
-GROUP_1=("safety_state_preservation" "safety_dynamic_obstacles" "distractor_static_distractors")
-GROUP_2=("distractor_dynamic_distractors" "extrapolation_preposition_combinations" "extrapolation_task_workflows")
-GROUP_3=("extrapolation_unseen_objects" "long_horizon")
+# Dynamic task allocation based on NUM_SERVERS
+# Will be populated later in the script
+declare -a GROUP_0 GROUP_1 GROUP_2 GROUP_3 GROUP_4 GROUP_5 GROUP_6 GROUP_7 GROUP_8 GROUP_9
 ###########################################################################################
 
 RED='\033[0;31m'
@@ -72,8 +71,9 @@ OPTIONS:
     --starvla-home PATH         starVLA root directory (default: auto-detected)
     --num-servers NUM            Number of parallel servers/groups (default: $NUM_SERVERS)
     --base-port PORT             Base port number (default: $BASE_PORT)
-    --gpu-mem-threshold MiB      Free GPU memory threshold (default: $GPU_MEM_THRESHOLD)
+    --gpu-mem-threshold MiB      Minimum free GPU memory threshold (default: $GPU_MEM_THRESHOLD)
     --server-wait SECONDS        Server startup timeout (default: $SERVER_STARTUP_WAIT)
+    --levels "0 1 2"            Space-separated list of task levels (default: $TASK_LEVELS)
     -h, --help                   Show this help message
 
 ENVIRONMENT VARIABLES:
@@ -84,6 +84,8 @@ ENVIRONMENT VARIABLES:
 EXAMPLES:
     $0 -c /path/to/ckpt.pt --vla-arena-env /path/to/VLA-Arena/envs/openpi
     STARVLA_HOME=/opt/starVLA $0 -c ckpt.pt --vla-arena-env /opt/VLA-Arena/envs/openpi
+    # Run only L0 tasks
+    $0 -c /path/to/ckpt.pt --vla-arena-env /path/to/VLA-Arena/envs/openpi --levels "0"
 EOF
 }
 
@@ -97,6 +99,7 @@ while [[ $# -gt 0 ]]; do
         --base-port)             BASE_PORT="$2"; shift 2 ;;
         --gpu-mem-threshold)     GPU_MEM_THRESHOLD="$2"; shift 2 ;;
         --server-wait)           SERVER_STARTUP_WAIT="$2"; shift 2 ;;
+        --levels)                TASK_LEVELS="$2"; shift 2 ;;
         -h|--help)               show_usage; exit 0 ;;
         *) print_error "Unknown option: $1"; show_usage; exit 1 ;;
     esac
@@ -125,28 +128,54 @@ if [[ ! -d "$STARVLA_HOME" ]]; then
     exit 1
 fi
 
-LOG_DIR="log"
+CKPT_DIR="$(cd "$(dirname "${your_ckpt}")" && pwd)"
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+LOG_DIR="${CKPT_DIR}/vla-arena_${TIMESTAMP}"
 mkdir -p "$LOG_DIR"
 
 print_info "starVLA home  : $STARVLA_HOME"
 print_info "VLA-Arena env : $VLA_ARENA_ENV"
 print_info "Checkpoint    : $your_ckpt"
 print_info "Log directory : $LOG_DIR"
+print_info "Number of servers: $NUM_SERVERS"
+
+# ---- Dynamic task allocation ----
+print_info "Allocating ${#ALL_SUITES[@]} task suites to ${NUM_SERVERS} servers..."
+
+# Reset all groups
+for i in $(seq 0 9); do
+    eval "GROUP_${i}=()"
+done
+
+# Distribute tasks evenly
+num_suites=${#ALL_SUITES[@]}
+for ((i=0; i<num_suites; i++)); do
+    group_idx=$((i % NUM_SERVERS))
+    eval "GROUP_${group_idx}+=(\"${ALL_SUITES[$i]}\")"
+done
+
+# Display task allocation
+for i in $(seq 0 $((NUM_SERVERS - 1))); do
+    eval "suites=($(echo \"\${GROUP_${i}[@]}\"))"
+    print_info "Server $i tasks: ${suites[*]}"
+done
 
 # ---- Step 1: Find free GPUs ----
-print_info "Detecting free GPUs (memory usage < ${GPU_MEM_THRESHOLD} MiB)..."
+print_info "Detecting available GPUs (free memory > ${GPU_MEM_THRESHOLD} MiB)..."
 
 FREE_GPUS=()
-while IFS=, read -r idx mem_used; do
+while IFS=, read -r idx mem_used mem_total; do
     idx=$(echo "$idx" | xargs)
     mem_used=$(echo "$mem_used" | xargs | sed 's/ MiB//')
-    if (( mem_used < GPU_MEM_THRESHOLD )); then
+    mem_total=$(echo "$mem_total" | xargs | sed 's/ MiB//')
+    mem_free=$((mem_total - mem_used))
+    if (( mem_free > GPU_MEM_THRESHOLD )); then
         FREE_GPUS+=("$idx")
     fi
-done < <(nvidia-smi --query-gpu=index,memory.used --format=csv,noheader)
+done < <(nvidia-smi --query-gpu=index,memory.used,memory.total --format=csv,noheader)
 
 if (( ${#FREE_GPUS[@]} < NUM_SERVERS )); then
-    print_error "Need ${NUM_SERVERS} free GPUs but only found ${#FREE_GPUS[@]}: ${FREE_GPUS[*]}"
+    print_error "Need ${NUM_SERVERS} available GPUs but only found ${#FREE_GPUS[@]}: ${FREE_GPUS[*]}"
     print_info "All GPU memory usage:"
     nvidia-smi --query-gpu=index,memory.used,memory.total --format=csv
     exit 1
@@ -297,11 +326,14 @@ for i in $(seq 0 $((NUM_SERVERS - 1))); do
     EVAL_LOGS+=("$eval_log")
 
     print_info "Starting eval group $i on port ${port}: ${suites_str}"
+    print_info "Task levels: ${TASK_LEVELS}"
     uv run --project "${VLA_ARENA_ENV}" \
         bash "${SCRIPT_DIR}/eval_vla_arena.sh" \
         --checkpoint "${your_ckpt}" \
         --port "${port}" \
         --suites "${suites_str}" \
+        --levels "${TASK_LEVELS}" \
+        -o "${LOG_DIR}/eval_group${i}" \
         > "${eval_log}" 2>&1 &
     EVAL_PIDS+=($!)
 done
@@ -335,3 +367,5 @@ fi
 
 print_info "Server logs: ${LOG_DIR}/server_gpu*.log"
 print_info "Eval logs: ${LOG_DIR}/eval_group*.log"
+
+# bash examples/VLA-Arena/eval_files/run_parallel_eval.sh -c /memory/shenboyang/outputs/train/starvla/vla_arena_loopoft_8x3_s1/checkpoints/steps_30000_pytorch_model.pt --vla-arena-env /home/shenboyang/myProjects/starVLA_eval/VLA-Arena/envs/openpi --levels "0"
